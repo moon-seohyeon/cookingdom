@@ -126,12 +126,12 @@ button.btn.small {
 table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 0.78rem;
+  font-size: 0.85rem;
 }
 
 th, td {
   border: 1px solid var(--border);
-  padding: 4px 6px;
+  padding: 7px 9px;
   text-align: center;
   white-space: nowrap;
 }
@@ -141,6 +141,7 @@ th {
   color: var(--accent-2);
   position: sticky;
   top: 0;
+  z-index: 2;
 }
 
 td.item-name {
@@ -149,25 +150,52 @@ td.item-name {
   background: #0d2038;
   position: sticky;
   left: 0;
+  z-index: 1;
+  line-height: 1.5;
+}
+
+tbody tr:nth-child(odd) td:not(.item-name) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+tbody tr:hover td {
+  background: rgba(111, 214, 255, 0.08);
+}
+
+tbody tr:hover td.item-name {
+  background: #123055;
 }
 
 .table-wrap {
   overflow-x: auto;
-  max-height: 70vh;
+  max-height: 74vh;
   overflow-y: auto;
   border-radius: 8px;
 }
 
-.cell-inputs {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+table.price-grid th.corner {
+  position: sticky;
+  left: 0;
+  top: 0;
+  z-index: 3;
 }
 
-.cell-inputs input {
-  width: 62px;
-  padding: 2px 4px;
+table.price-grid thead tr.sub-head th {
+  top: 37px;
   font-size: 0.72rem;
+  color: var(--text-dim);
+  padding: 5px 6px;
+}
+
+table.price-grid th.island-head {
+  color: var(--accent);
+}
+
+table.price-grid td input {
+  width: 64px;
+  padding: 4px 5px;
+  font-size: 0.8rem;
+  text-align: right;
 }
 
 .badge {

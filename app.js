@@ -1,14 +1,13 @@
 // 영광의 항로 무역 도우미 - 메인 로직
 
-const STORAGE_KEY = "glory_route_trade_tracker_v1";
+const STORAGE_KEY = "glory_route_trade_tracker_v2";
 
 function emptyGrid() {
   const grid = {};
   ITEMS.forEach((it) => {
     grid[it.name] = {};
     ISLANDS.forEach((isl) => {
-      const canBuy = !it.exclusive || it.exclusive === isl;
-      grid[it.name][isl] = { buy: canBuy ? null : null, sell: null, stock: null };
+      grid[it.name][isl] = { buy: null, sell: null, stock: null };
     });
   });
   return grid;
@@ -20,7 +19,6 @@ function defaultState() {
     chapters: {
       1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "" },
     },
-    cargoCapacity: 50,
     ledger: [],
   };
 }
@@ -69,7 +67,6 @@ function parseNumOrNull(v) {
 
 // ---------- TAB SWITCHING ----------
 
-const TABS = ["price", "trade", "ledger", "history"];
 let activeTab = "price";
 
 function switchTab(tab) {
@@ -107,8 +104,8 @@ function renderPriceTab(main) {
       </select>
       <button class="btn small" id="new-chapter-btn">다음 장 새로 추가</button>
       <button class="btn small secondary" id="copy-prev-btn">이전 장 값 복사해서 채우기</button>
-      <span class="muted">품목별 구매가 / 판매가 / 재고량을 입력하세요. 산지 전용 품목은 원산지 섬만 구매 가능합니다.</span>
     </div>
+    <p class="hint">품목별 구매가 / 판매가 / 재고량을 섬마다 입력하세요. 산지 전용 품목은 원산지 섬 외에는 구매 칸이 비활성화됩니다.</p>
     <div class="row" style="flex-direction:column;align-items:stretch;">
       <label>이번 장 특이사항 (돌발 이벤트, 환경 요소 등)</label>
       <textarea id="chapter-notes" placeholder="예: 감정가들의 섬에서 털뭉치 인형 구매가 감소 / 전체섬 코코넛 꽃게 재고 증가">${chapterData.notes || ""}</textarea>
@@ -121,8 +118,12 @@ function renderPriceTab(main) {
   const wrap = document.createElement("div");
   wrap.className = "table-wrap";
 
-  let html = "<table><thead><tr><th>품목</th>";
-  ISLANDS.forEach((isl) => (html += `<th>${isl}</th>`));
+  let html = '<table class="price-grid"><thead><tr><th rowspan="2" class="corner">품목</th>';
+  ISLANDS.forEach((isl) => (html += `<th colspan="3" class="island-head">${isl}</th>`));
+  html += '</tr><tr class="sub-head">';
+  ISLANDS.forEach(() => {
+    html += `<th>구매</th><th>판매</th><th>재고</th>`;
+  });
   html += "</tr></thead><tbody>";
 
   ITEMS.forEach((it) => {
@@ -132,15 +133,13 @@ function renderPriceTab(main) {
     ISLANDS.forEach((isl) => {
       const cell = chapterData.prices[it.name][isl];
       const canBuy = !it.exclusive || it.exclusive === isl;
-      html += `<td><div class="cell-inputs">
-        ${
-          canBuy
-            ? `<input type="number" data-item="${it.name}" data-island="${isl}" data-field="buy" value="${cell.buy ?? ""}" placeholder="구매">`
-            : `<input type="number" disabled placeholder="구매불가" style="opacity:.35">`
-        }
-        <input type="number" data-item="${it.name}" data-island="${isl}" data-field="sell" value="${cell.sell ?? ""}" placeholder="판매">
-        <input type="number" data-item="${it.name}" data-island="${isl}" data-field="stock" value="${cell.stock ?? ""}" placeholder="재고">
-      </div></td>`;
+      html += `<td>${
+        canBuy
+          ? `<input type="number" data-item="${it.name}" data-island="${isl}" data-field="buy" value="${cell.buy ?? ""}">`
+          : `<input type="number" disabled style="opacity:.3">`
+      }</td>`;
+      html += `<td><input type="number" data-item="${it.name}" data-island="${isl}" data-field="sell" value="${cell.sell ?? ""}"></td>`;
+      html += `<td><input type="number" data-item="${it.name}" data-island="${isl}" data-field="stock" value="${cell.stock ?? ""}"></td>`;
     });
     html += "</tr>";
   });
@@ -190,154 +189,129 @@ function renderPriceTab(main) {
   });
 }
 
-// ---------- TAB 2: 거래 추천 ----------
+// ---------- TAB 2: 거래 추천 (출발섬 -> 도착섬 기준) ----------
 
-function computeBestTrades(chapterData) {
-  const results = [];
-  ITEMS.forEach((it) => {
-    const grid = chapterData.prices[it.name];
-    let bestBuy = null;
-    let bestSell = null;
-    ISLANDS.forEach((isl) => {
-      const cell = grid[isl];
-      if (cell.buy !== null && cell.buy !== undefined) {
-        if (!bestBuy || cell.buy < bestBuy.price) bestBuy = { island: isl, price: cell.buy, stock: cell.stock };
+const ALL_OPTION = "__ALL__";
+
+function bestTradeForItem(chapterData, item, originFilter, destFilter) {
+  const grid = chapterData.prices[item.name];
+  const origins = originFilter === ALL_OPTION ? ISLANDS : [originFilter];
+  const dests = destFilter === ALL_OPTION ? ISLANDS : [destFilter];
+
+  let best = null;
+  origins.forEach((o) => {
+    const buyCell = grid[o];
+    if (buyCell.buy === null || buyCell.buy === undefined) return;
+    dests.forEach((d) => {
+      if (d === o) return;
+      const sellCell = grid[d];
+      if (sellCell.sell === null || sellCell.sell === undefined) return;
+      const margin = sellCell.sell - buyCell.buy;
+      if (!best || margin > best.margin) {
+        best = {
+          origin: o,
+          dest: d,
+          buyPrice: buyCell.buy,
+          sellPrice: sellCell.sell,
+          buyStock: buyCell.stock,
+          sellStock: sellCell.stock,
+          margin,
+        };
       }
-      if (cell.sell !== null && cell.sell !== undefined) {
-        if (!bestSell || cell.sell > bestSell.price) bestSell = { island: isl, price: cell.sell, stock: cell.stock };
-      }
-    });
-    if (!bestBuy || !bestSell) return;
-    // 같은 섬에서 사고 파는 조합은 제외하고 다음으로 좋은 판매처를 찾는다
-    if (bestBuy.island === bestSell.island) {
-      let alt = null;
-      ISLANDS.forEach((isl) => {
-        if (isl === bestBuy.island) return;
-        const cell = grid[isl];
-        if (cell.sell !== null && cell.sell !== undefined) {
-          if (!alt || cell.sell > alt.price) alt = { island: isl, price: cell.sell, stock: cell.stock };
-        }
-      });
-      bestSell = alt || bestSell;
-    }
-    const margin = bestSell.price - bestBuy.price;
-    const maxQty = Math.min(
-      state.cargoCapacity,
-      bestBuy.stock ?? Infinity,
-      bestSell.stock ?? Infinity
-    );
-    results.push({
-      item: it.name,
-      category: it.category,
-      exclusive: it.exclusive,
-      bestBuy,
-      bestSell,
-      margin,
-      maxQty: Math.max(0, maxQty),
-      totalProfit: margin * Math.max(0, maxQty),
     });
   });
-  results.sort((a, b) => b.margin - a.margin);
-  return results;
+  return best;
 }
 
 function renderTradeTab(main) {
   const cur = state.currentChapter;
   const chapterData = getChapter(cur);
-  const trades = computeBestTrades(chapterData);
+
+  const originSel = window.__tradeOrigin || ALL_OPTION;
+  const destSel = window.__tradeDest || ALL_OPTION;
 
   const panel = document.createElement("div");
   panel.className = "panel";
   panel.innerHTML = `
     <div class="row">
-      <label>${cur}장 기준 추천</label>
-      <label>선적량(적재 가능 개수)</label>
-      <input type="number" id="cargo-cap" value="${state.cargoCapacity}" style="width:80px">
-      <span class="muted">무역품 화면에서 확인한 적재 한도를 입력하면 추천 수량이 그에 맞춰 계산됩니다.</span>
+      <label>${cur}장 · 지금 있는 섬</label>
+      <select id="origin-select">
+        <option value="${ALL_OPTION}" ${originSel === ALL_OPTION ? "selected" : ""}>전체 (아직 안 정함)</option>
+        ${ISLANDS.map((isl) => `<option value="${isl}" ${isl === originSel ? "selected" : ""}>${isl}</option>`).join("")}
+      </select>
+      <label>→ 다음에 갈 섬</label>
+      <select id="dest-select">
+        <option value="${ALL_OPTION}" ${destSel === ALL_OPTION ? "selected" : ""}>전체 (자동으로 제일 좋은 섬 찾기)</option>
+        ${ISLANDS.map((isl) => `<option value="${isl}" ${isl === destSel ? "selected" : ""}>${isl}</option>`).join("")}
+      </select>
     </div>
+    <p class="hint">지금 있는 섬과 다음에 갈 섬을 고르면, 거기서 사서 저기서 팔았을 때 이득이 큰 순서대로 정렬해줘요. 아직 못 정했으면 "전체"로 두면 가능한 모든 조합 중 최선을 찾아줍니다.</p>
   `;
   main.appendChild(panel);
 
-  // 추천 조합 (greedy knapsack)
-  let remaining = state.cargoCapacity;
-  const picks = [];
-  for (const t of trades) {
-    if (remaining <= 0) break;
-    if (t.margin <= 0) continue;
-    const qty = Math.min(t.maxQty, remaining);
-    if (qty <= 0) continue;
-    picks.push({ ...t, qty, profit: qty * t.margin });
-    remaining -= qty;
-  }
-  const totalProfit = picks.reduce((s, p) => s + p.profit, 0);
-  const usedCapacity = state.cargoCapacity - remaining;
+  const trades = [];
+  ITEMS.forEach((it) => {
+    const best = bestTradeForItem(chapterData, it, originSel, destSel);
+    if (!best || best.margin <= -999999) return;
+    trades.push({ item: it, best });
+  });
+  trades.sort((a, b) => b.best.margin - a.best.margin);
 
-  const summary = document.createElement("div");
-  summary.className = "panel";
-  summary.innerHTML = `
-    <h3 style="margin-top:0;color:var(--accent)">이번 장 추천 조합 (마진 높은 순으로 선적량까지 채움)</h3>
-    <div class="summary-cards">
-      <div class="card"><div class="label">예상 총 이익</div><div class="value">${fmt(totalProfit)}</div></div>
-      <div class="card"><div class="label">사용 선적량</div><div class="value">${usedCapacity} / ${state.cargoCapacity}</div></div>
-      <div class="card"><div class="label">추천 품목 수</div><div class="value">${picks.length}</div></div>
-    </div>
+  const resultPanel = document.createElement("div");
+  resultPanel.className = "panel";
+  const headingText =
+    originSel === ALL_OPTION && destSel === ALL_OPTION
+      ? "전체 조합 중 효율 순위"
+      : originSel !== ALL_OPTION && destSel !== ALL_OPTION
+      ? `${originSel} → ${destSel} 효율 순위`
+      : originSel !== ALL_OPTION
+      ? `${originSel}에서 살 것 (도착섬은 자동 최적)`
+      : `${destSel}에서 팔 것 (출발섬은 자동 최적)`;
+
+  resultPanel.innerHTML = `
+    <h3 style="margin-top:0;color:var(--accent)">${headingText}</h3>
     <div class="table-wrap" style="max-height:none">
       <table>
-        <thead><tr><th>품목</th><th>구매처</th><th>판매처</th><th>개당 마진</th><th>수량</th><th>예상 이익</th></tr></thead>
+        <thead><tr>
+          <th>순위</th><th>품목</th><th>분류</th><th>구매처</th><th>판매처</th>
+          <th>개당 마진</th><th>마진율</th><th>재고(구매/판매)</th><th>재고 기준 예상이익</th>
+        </tr></thead>
         <tbody>
           ${
-            picks.length
-              ? picks
-                  .map(
-                    (p) => `<tr>
-              <td class="item-name" style="position:static">${p.item}${p.exclusive ? `<span class="badge exclusive">전용</span>` : ""}</td>
-              <td>${p.bestBuy.island} (${fmt(p.bestBuy.price)})</td>
-              <td>${p.bestSell.island} (${fmt(p.bestSell.price)})</td>
-              <td class="profit-pos">+${fmt(p.margin)}</td>
-              <td>${p.qty}</td>
-              <td class="profit-pos">+${fmt(p.profit)}</td>
-            </tr>`
-                  )
+            trades.length
+              ? trades
+                  .map(({ item, best }, idx) => {
+                    const marginPct = best.buyPrice ? ((best.margin / best.buyPrice) * 100).toFixed(1) : "-";
+                    const maxQty = Math.min(best.buyStock ?? Infinity, best.sellStock ?? Infinity);
+                    const potential = Number.isFinite(maxQty) ? maxQty * best.margin : null;
+                    return `<tr>
+                <td>${idx + 1}</td>
+                <td class="item-name" style="position:static">${item.name}${item.exclusive ? `<span class="badge exclusive">${item.exclusive} 전용</span>` : ""}</td>
+                <td><span class="badge cat">${item.category}</span></td>
+                <td>${best.origin} (${fmt(best.buyPrice)})</td>
+                <td>${best.dest} (${fmt(best.sellPrice)})</td>
+                <td class="${best.margin >= 0 ? "profit-pos" : "profit-neg"}">${best.margin >= 0 ? "+" : ""}${fmt(best.margin)}</td>
+                <td class="${best.margin >= 0 ? "profit-pos" : "profit-neg"}">${marginPct}%</td>
+                <td>${fmt(best.buyStock)} / ${fmt(best.sellStock)}</td>
+                <td class="${(potential ?? 0) >= 0 ? "profit-pos" : "profit-neg"}">${potential === null ? "-" : fmt(potential)}</td>
+              </tr>`;
+                  })
                   .join("")
-              : `<tr><td colspan="6" class="muted">추천할 수 있는 거래가 없습니다. 가격을 입력했는지 확인하세요.</td></tr>`
+              : `<tr><td colspan="9" class="muted">이 조합으로 거래 가능한 품목이 없습니다. 가격을 입력했는지, 산지 전용 품목 방향이 맞는지 확인하세요.</td></tr>`
           }
         </tbody>
       </table>
     </div>
-    <p class="hint">※ 실제 섬 간 이동 턴/내구도는 매 항해마다 지형이 달라 자동 반영하지 못합니다. 위 추천은 "무엇을 어디서 사서 어디서 팔면 이득인지"만 계산한 것이니, 실제 경로는 지도를 보며 이 목록을 참고해 직접 정하세요. 돛단배(내구도 +350)를 지나는 경로가 있다면 우선하세요.</p>
+    <p class="hint">※ 실제 섬 간 이동 턴/내구도는 매 항해마다 지형이 달라 자동 반영하지 못합니다. 돛단배(내구도 +350)를 지나는 경로가 있다면 우선하세요.</p>
   `;
-  main.appendChild(summary);
+  main.appendChild(resultPanel);
 
-  const allPanel = document.createElement("div");
-  allPanel.className = "panel";
-  allPanel.innerHTML = `
-    <h3 style="margin-top:0;color:var(--accent-2)">전체 품목 마진 순위</h3>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>품목</th><th>분류</th><th>최저 구매처</th><th>최고 판매처</th><th>개당 마진</th><th>최대 구매가능</th><th>총 잠재이익</th></tr></thead>
-        <tbody>
-          ${trades
-            .map(
-              (t) => `<tr>
-            <td class="item-name" style="position:static">${t.item}${t.exclusive ? `<span class="badge exclusive">${t.exclusive} 전용</span>` : ""}</td>
-            <td><span class="badge cat">${t.category}</span></td>
-            <td>${t.bestBuy.island} (${fmt(t.bestBuy.price)})</td>
-            <td>${t.bestSell.island} (${fmt(t.bestSell.price)})</td>
-            <td class="${t.margin >= 0 ? "profit-pos" : "profit-neg"}">${t.margin >= 0 ? "+" : ""}${fmt(t.margin)}</td>
-            <td>${t.maxQty}</td>
-            <td class="${t.totalProfit >= 0 ? "profit-pos" : "profit-neg"}">${fmt(t.totalProfit)}</td>
-          </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-  main.appendChild(allPanel);
-
-  document.getElementById("cargo-cap").addEventListener("input", (e) => {
-    state.cargoCapacity = Number(e.target.value) || 0;
-    saveState();
+  document.getElementById("origin-select").addEventListener("change", (e) => {
+    window.__tradeOrigin = e.target.value;
+    render();
+  });
+  document.getElementById("dest-select").addEventListener("change", (e) => {
+    window.__tradeDest = e.target.value;
     render();
   });
 }
@@ -404,7 +378,7 @@ function renderLedgerTab(main) {
           <span class="tag">개당 ${fmt(l.buyPrice)} (${l.chapterBought}장 구매)</span>
         </div>
         <div class="row" style="margin:0;gap:6px">
-          <select data-role="sell-island">${ISLANDS.map((isl) => `<option ${isl === l.buyIsland ? "" : ""} value="${isl}">${isl}</option>`).join("")}</select>
+          <select data-role="sell-island">${ISLANDS.map((isl) => `<option value="${isl}">${isl}</option>`).join("")}</select>
           <input data-role="sell-price" type="number" placeholder="판매가" style="width:80px">
           <button class="btn small" data-role="sell-confirm" data-id="${l.id}">판매 처리</button>
           <button class="btn small secondary" data-role="delete" data-id="${l.id}">삭제</button>
@@ -496,12 +470,8 @@ function renderLedgerTab(main) {
     });
   });
 
-  document.getElementById("ledger-item").addEventListener("change", (e) => {
-    autofillLedgerPrice();
-  });
-  document.getElementById("ledger-island").addEventListener("change", (e) => {
-    autofillLedgerPrice();
-  });
+  document.getElementById("ledger-item").addEventListener("change", autofillLedgerPrice);
+  document.getElementById("ledger-island").addEventListener("change", autofillLedgerPrice);
 
   function autofillLedgerPrice() {
     const item = document.getElementById("ledger-item").value;
@@ -551,10 +521,11 @@ function renderHistoryTab(main) {
   tablePanel.innerHTML = html;
   main.appendChild(tablePanel);
 
-  if (state.chapters[state.currentChapter]?.notes || Object.values(state.chapters).some((c) => c.notes)) {
+  if (nums.some((n) => state.chapters[n].notes)) {
     const notesPanel = document.createElement("div");
     notesPanel.className = "panel";
-    notesPanel.innerHTML = `<h3 style="margin-top:0;color:var(--accent-2)">장별 특이사항 메모</h3>` +
+    notesPanel.innerHTML =
+      `<h3 style="margin-top:0;color:var(--accent-2)">장별 특이사항 메모</h3>` +
       nums
         .filter((n) => state.chapters[n].notes)
         .map((n) => `<p class="hint"><strong>${n}장:</strong> ${state.chapters[n].notes}</p>`)
