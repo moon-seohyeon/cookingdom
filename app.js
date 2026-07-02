@@ -21,6 +21,8 @@ function defaultState() {
     },
     ledger: [],
     budget: 0,
+    // 항해(내구도 소진 등)가 리셋돼도 사라지지 않는, 품목별 누적 가격 통계
+    archivedPriceStats: {},
   };
 }
 
@@ -33,6 +35,7 @@ function loadState() {
     const parsed = JSON.parse(raw);
     if (!parsed.chapters || !parsed.chapters[1]) return defaultState();
     if (parsed.budget === undefined) parsed.budget = 0;
+    if (!parsed.archivedPriceStats) parsed.archivedPriceStats = {};
     return parsed;
   } catch (e) {
     return defaultState();
@@ -54,6 +57,97 @@ function chapterNums() {
   return Object.keys(state.chapters)
     .map(Number)
     .sort((a, b) => a - b);
+}
+
+// 한 장(chapter) 안에서 어떤 품목의 섬별 최저 구매가 / 최고 판매가
+function chapterMinMax(chapterPrices, itemName) {
+  const grid = chapterPrices[itemName];
+  let lowBuy = null;
+  let highSell = null;
+  if (!grid) return { lowBuy, highSell };
+  ISLANDS.forEach((isl) => {
+    const cell = grid[isl];
+    if (cell.buy !== null && cell.buy !== undefined) {
+      if (lowBuy === null || cell.buy < lowBuy) lowBuy = cell.buy;
+    }
+    if (cell.sell !== null && cell.sell !== undefined) {
+      if (highSell === null || cell.sell > highSell) highSell = cell.sell;
+    }
+  });
+  return { lowBuy, highSell };
+}
+
+// 지금까지 기록된(이번 항해 진행분 + 리셋 전 항해들에서 보관된) 품목별 평균가.
+// avgLowBuy: 장마다의 "가장 싼 구매가"를 평균낸 값 -> 지금 가격이 이보다 낮으면 평소보다 싼 것
+// avgHighSell: 장마다의 "가장 비싼 판매가"를 평균낸 값 -> 지금 가격이 이보다 높으면 평소보다 비싸게 파는 것
+function computeItemStats(itemName) {
+  const archived = state.archivedPriceStats[itemName] || {
+    lowBuySum: 0,
+    lowBuyCount: 0,
+    highSellSum: 0,
+    highSellCount: 0,
+  };
+  let lowBuySum = archived.lowBuySum;
+  let lowBuyCount = archived.lowBuyCount;
+  let highSellSum = archived.highSellSum;
+  let highSellCount = archived.highSellCount;
+
+  chapterNums().forEach((n) => {
+    const { lowBuy, highSell } = chapterMinMax(state.chapters[n].prices, itemName);
+    if (lowBuy !== null) {
+      lowBuySum += lowBuy;
+      lowBuyCount += 1;
+    }
+    if (highSell !== null) {
+      highSellSum += highSell;
+      highSellCount += 1;
+    }
+  });
+
+  return {
+    avgLowBuy: lowBuyCount ? lowBuySum / lowBuyCount : null,
+    avgHighSell: highSellCount ? highSellSum / highSellCount : null,
+    lowBuyCount,
+    highSellCount,
+  };
+}
+
+// 새 항해 시작: 이번 항해의 시세/구매기록은 지우되, 품목별 누적 평균 통계는 archivedPriceStats에 보관해 유지한다.
+function resetVoyage() {
+  const ok = confirm(
+    "새 항해를 시작할까요?\n\n지금 입력된 이번 항해의 장별 시세와 구매 기록은 모두 사라집니다.\n(품목별 평균 가격 기록은 계속 유지됩니다)"
+  );
+  if (!ok) return;
+
+  const archive = state.archivedPriceStats;
+  ITEMS.forEach((it) => {
+    if (!archive[it.name]) {
+      archive[it.name] = { lowBuySum: 0, lowBuyCount: 0, highSellSum: 0, highSellCount: 0 };
+    }
+  });
+  chapterNums().forEach((n) => {
+    ITEMS.forEach((it) => {
+      const { lowBuy, highSell } = chapterMinMax(state.chapters[n].prices, it.name);
+      if (lowBuy !== null) {
+        archive[it.name].lowBuySum += lowBuy;
+        archive[it.name].lowBuyCount += 1;
+      }
+      if (highSell !== null) {
+        archive[it.name].highSellSum += highSell;
+        archive[it.name].highSellCount += 1;
+      }
+    });
+  });
+
+  state.chapters = { 1: { prices: emptyGrid(), notes: "" } };
+  state.currentChapter = 1;
+  state.ledger = [];
+  window.__tradeOrigin = null;
+  window.__tradeDest = null;
+  saveState();
+  activeTab = "price";
+  document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "price"));
+  render();
 }
 
 function fmt(n) {
@@ -106,14 +200,30 @@ function renderPriceTab(main) {
       </select>
       <button class="btn small" id="new-chapter-btn">다음 장 새로 추가</button>
       <button class="btn small secondary" id="copy-prev-btn">이전 장 값 복사해서 채우기</button>
+      <button class="btn small secondary" id="reset-voyage-btn" style="border-color:var(--bad);color:var(--bad);margin-left:auto">🔄 새 항해 시작 (리셋)</button>
     </div>
-    <p class="hint">품목별 구매가 / 판매가 / 재고량을 섬마다 입력하세요. 산지 전용 품목은 원산지 섬 외에는 구매 칸이 비활성화됩니다.</p>
+    <p class="hint">품목별 구매가 / 판매가 / 재고량을 섬마다 입력하세요. 산지 전용 품목은 원산지 섬 외에는 구매 칸이 비활성화됩니다. 내구도가 다 떨어져 항해가 끝나면 "새 항해 시작"을 눌러 초기화하세요 (품목별 평균 가격 기록은 유지됩니다).</p>
     <div class="row" style="flex-direction:column;align-items:stretch;">
       <label>이번 장 특이사항 (돌발 이벤트, 환경 요소 등)</label>
       <textarea id="chapter-notes" placeholder="예: 감정가들의 섬에서 털뭉치 인형 구매가 감소 / 전체섬 코코넛 꽃게 재고 증가">${chapterData.notes || ""}</textarea>
     </div>
   `;
   main.appendChild(panel);
+
+  const pastePanel = document.createElement("div");
+  pastePanel.className = "panel";
+  pastePanel.innerHTML = `
+    <h3 style="margin-top:0;color:var(--accent-2)">빠른 입력: 클로드가 정리해준 값 붙여넣기</h3>
+    <p class="hint">섬별 무역품 스크린샷을 클로드에게 보내면, 이 표에 붙여넣을 텍스트를 만들어줄 거예요. 그 텍스트를 아래 칸에 붙여넣고 "적용"을 누르면 표가 자동으로 채워집니다. 직접 표를 입력해도 물론 됩니다.</p>
+    <div class="row" style="flex-direction:column;align-items:stretch;">
+      <textarea id="paste-input" placeholder="클로드가 준 텍스트를 여기에 붙여넣으세요" style="min-height:70px;font-family:monospace;font-size:0.78rem;"></textarea>
+    </div>
+    <div class="row">
+      <button class="btn small" id="paste-apply-btn">적용</button>
+      <span class="muted" id="paste-status"></span>
+    </div>
+  `;
+  main.appendChild(pastePanel);
 
   const tablePanel = document.createElement("div");
   tablePanel.className = "panel";
@@ -180,6 +290,41 @@ function renderPriceTab(main) {
   document.getElementById("chapter-notes").addEventListener("input", (e) => {
     chapterData.notes = e.target.value;
     saveState();
+  });
+
+  document.getElementById("reset-voyage-btn").addEventListener("click", resetVoyage);
+
+  document.getElementById("paste-apply-btn").addEventListener("click", () => {
+    const statusEl = document.getElementById("paste-status");
+    const raw = document.getElementById("paste-input").value.trim();
+    if (!raw) {
+      statusEl.textContent = "붙여넣을 내용이 없습니다.";
+      return;
+    }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      statusEl.textContent = "형식을 읽을 수 없습니다. 클로드가 준 텍스트를 그대로 복사했는지 확인해주세요.";
+      return;
+    }
+    let applied = 0;
+    Object.keys(data).forEach((itemName) => {
+      if (!chapterData.prices[itemName]) return;
+      const islandsData = data[itemName] || {};
+      Object.keys(islandsData).forEach((islandName) => {
+        if (!ISLANDS.includes(islandName)) return;
+        const incoming = islandsData[islandName] || {};
+        const cell = chapterData.prices[itemName][islandName];
+        if (incoming.buy !== undefined) cell.buy = incoming.buy;
+        if (incoming.sell !== undefined) cell.sell = incoming.sell;
+        if (incoming.stock !== undefined) cell.stock = incoming.stock;
+        applied++;
+      });
+    });
+    saveState();
+    render();
+    alert(`${applied}개 칸에 가격을 적용했습니다.`);
   });
 
   wrap.querySelectorAll("input[data-item]").forEach((input) => {
@@ -324,6 +469,60 @@ function renderTradeTab(main) {
     trades.push({ item: it, best });
   });
   trades.sort((a, b) => b.best.margin - a.best.margin);
+
+  const stockpilePanel = document.createElement("div");
+  stockpilePanel.className = "panel";
+  if (originSel === ALL_OPTION) {
+    stockpilePanel.innerHTML = `
+      <h3 style="margin-top:0;color:var(--accent)">이 섬에 남아서 사둘 것 추천 (평소 대비 저렴한 순)</h3>
+      <p class="muted">다음 섬으로 이동할 턴이 부족해서 지금 섬에 계속 머물러야 할 때, 여기서 뭘 사서 다음 장에 팔지 정할 때 써보세요. 위에서 "지금 있는 섬"을 구체적으로 고르면 추천이 나옵니다.</p>
+    `;
+  } else {
+    const rows = [];
+    ITEMS.forEach((it) => {
+      const cell = chapterData.prices[it.name][originSel];
+      if (cell.buy === null || cell.buy === undefined) return;
+      const stats = computeItemStats(it.name);
+      const discountPct = stats.avgLowBuy ? ((stats.avgLowBuy - cell.buy) / stats.avgLowBuy) * 100 : null;
+      rows.push({ item: it, buyPrice: cell.buy, stock: cell.stock, avgLowBuy: stats.avgLowBuy, discountPct, sampleCount: stats.lowBuyCount });
+    });
+    rows.sort((a, b) => {
+      if (a.discountPct === null && b.discountPct === null) return a.buyPrice - b.buyPrice;
+      if (a.discountPct === null) return 1;
+      if (b.discountPct === null) return -1;
+      return b.discountPct - a.discountPct;
+    });
+    stockpilePanel.innerHTML = `
+      <h3 style="margin-top:0;color:var(--accent)">${originSel}에 남아서 사둘 것 추천 (평소 대비 저렴한 순)</h3>
+      <p class="hint">다음 섬으로 이동할 턴이 부족할 때, 지금 섬에서 사서 다음 장에 파는 용도예요. "평소 낮은 평균"은 지금까지 이 품목의 장별 최저 구매가를 평균낸 값이고, 지금 가격이 그보다 쌀수록 순위가 높습니다.</p>
+      <div class="table-wrap" style="max-height:none">
+        <table>
+          <thead><tr><th>품목</th><th>지금 구매가</th><th>평소 낮은 평균</th><th>할인율</th><th>기록된 장 수</th><th>재고</th></tr></thead>
+          <tbody>
+            ${
+              rows.length
+                ? rows
+                    .map(
+                      (r) => `<tr>
+                <td class="item-name" style="position:static">${r.item.name}${r.item.exclusive ? `<span class="badge exclusive">${r.item.exclusive} 전용</span>` : ""}</td>
+                <td>${fmt(r.buyPrice)}</td>
+                <td>${r.avgLowBuy !== null ? fmt(Math.round(r.avgLowBuy)) : "-"}</td>
+                <td class="${r.discountPct === null ? "" : r.discountPct >= 0 ? "profit-pos" : "profit-neg"}">${
+                        r.discountPct === null ? "기록 부족" : `${r.discountPct >= 0 ? "▼" : "▲"} ${Math.abs(r.discountPct).toFixed(1)}%`
+                      }</td>
+                <td>${r.sampleCount}</td>
+                <td>${fmt(r.stock)}</td>
+              </tr>`
+                    )
+                    .join("")
+                : `<tr><td colspan="6" class="muted">${originSel}에서 구매 가능한 품목이 없습니다.</td></tr>`
+            }
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+  main.appendChild(stockpilePanel);
 
   const budgetPanel = document.createElement("div");
   budgetPanel.className = "panel";
@@ -572,6 +771,32 @@ function renderLedgerTab(main) {
 // ---------- TAB 4: 가격 히스토리 ----------
 
 function renderHistoryTab(main) {
+  const summaryPanel = document.createElement("div");
+  summaryPanel.className = "panel";
+  const statRows = ITEMS.map((it) => ({ item: it, stats: computeItemStats(it.name) }));
+  summaryPanel.innerHTML = `
+    <h3 style="margin-top:0;color:var(--accent)">품목별 평균 가격 (리셋해도 유지됨)</h3>
+    <p class="hint">평소 낮은 구매가 평균 / 평소 높은 판매가 평균이에요. 지금 어떤 섬의 가격이 이 평균보다 유리하면 그때가 사거나 팔 타이밍입니다. 항해가 끝나서 리셋해도 이 평균은 계속 쌓입니다.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>품목</th><th>평소 낮은 구매가 평균</th><th>평소 높은 판매가 평균</th><th>기록된 장 수</th></tr></thead>
+        <tbody>
+          ${statRows
+            .map(
+              ({ item, stats }) => `<tr>
+            <td class="item-name" style="position:static">${item.name}${item.exclusive ? `<span class="badge exclusive">${item.exclusive} 전용</span>` : ""}</td>
+            <td>${stats.avgLowBuy !== null ? fmt(Math.round(stats.avgLowBuy)) : "-"}</td>
+            <td>${stats.avgHighSell !== null ? fmt(Math.round(stats.avgHighSell)) : "-"}</td>
+            <td>${stats.lowBuyCount}</td>
+          </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  main.appendChild(summaryPanel);
+
   const panel = document.createElement("div");
   panel.className = "panel";
   const nums = chapterNums();
