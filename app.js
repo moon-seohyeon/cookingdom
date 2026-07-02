@@ -20,6 +20,7 @@ function defaultState() {
       1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "" },
     },
     ledger: [],
+    budget: 0,
   };
 }
 
@@ -31,6 +32,7 @@ function loadState() {
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw);
     if (!parsed.chapters || !parsed.chapters[1]) return defaultState();
+    if (parsed.budget === undefined) parsed.budget = 0;
     return parsed;
   } catch (e) {
     return defaultState();
@@ -223,6 +225,72 @@ function bestTradeForItem(chapterData, item, originFilter, destFilter) {
   return best;
 }
 
+// 가진 돈(budget) 안에서 이익을 최대화하는 구매 조합을 그리디로 계산한다.
+// 골드당 이익(margin/buyPrice, ROI)이 높은 품목부터 예산과 재고가 허락하는 만큼 채운다.
+function computeBudgetPlan(trades, budget) {
+  const candidates = trades
+    .filter(({ best }) => best.margin > 0 && best.buyPrice > 0)
+    .slice()
+    .sort((a, b) => b.best.margin / b.best.buyPrice - a.best.margin / a.best.buyPrice);
+
+  let remaining = budget;
+  const picks = [];
+  candidates.forEach(({ item, best }) => {
+    if (remaining < best.buyPrice) return;
+    const maxByStock = Math.min(best.buyStock ?? Infinity, best.sellStock ?? Infinity);
+    const maxByBudget = Math.floor(remaining / best.buyPrice);
+    const qty = Math.min(maxByStock, maxByBudget);
+    if (qty <= 0) return;
+    const cost = qty * best.buyPrice;
+    const revenue = qty * best.sellPrice;
+    picks.push({ item, best, qty, cost, revenue, profit: revenue - cost });
+    remaining -= cost;
+  });
+
+  const totalCost = picks.reduce((s, p) => s + p.cost, 0);
+  const totalRevenue = picks.reduce((s, p) => s + p.revenue, 0);
+  return { picks, totalCost, totalRevenue, totalProfit: totalRevenue - totalCost, remaining };
+}
+
+function budgetPlanHTML(trades) {
+  const budget = state.budget || 0;
+  const plan = computeBudgetPlan(trades, budget);
+  if (!budget) {
+    return `<p class="muted">가진 돈을 입력하면, 그 예산 안에서 이익이 최대가 되도록 무엇을 얼마나 살지 계산해줍니다.</p>`;
+  }
+  if (!plan.picks.length) {
+    return `<p class="muted">이 예산과 조합으로는 이득이 남는 거래가 없습니다.</p>`;
+  }
+  return `
+    <div class="summary-cards">
+      <div class="card"><div class="label">투입 금액</div><div class="value">${fmt(plan.totalCost)}</div></div>
+      <div class="card"><div class="label">예상 판매 금액</div><div class="value">${fmt(plan.totalRevenue)}</div></div>
+      <div class="card"><div class="label">예상 순이익</div><div class="value profit-pos">+${fmt(plan.totalProfit)}</div></div>
+      <div class="card"><div class="label">남는 돈</div><div class="value">${fmt(plan.remaining)}</div></div>
+    </div>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>품목</th><th>구매처</th><th>판매처</th><th>개당가</th><th>수량</th><th>투입금액</th><th>예상이익</th></tr></thead>
+        <tbody>
+          ${plan.picks
+            .map(
+              (p) => `<tr>
+            <td class="item-name" style="position:static">${p.item.name}${p.item.exclusive ? `<span class="badge exclusive">${p.item.exclusive} 전용</span>` : ""}</td>
+            <td>${p.best.origin}</td>
+            <td>${p.best.dest}</td>
+            <td>${fmt(p.best.buyPrice)}</td>
+            <td>${p.qty}</td>
+            <td>${fmt(p.cost)}</td>
+            <td class="profit-pos">+${fmt(p.profit)}</td>
+          </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderTradeTab(main) {
   const cur = state.currentChapter;
   const chapterData = getChapter(cur);
@@ -256,6 +324,18 @@ function renderTradeTab(main) {
     trades.push({ item: it, best });
   });
   trades.sort((a, b) => b.best.margin - a.best.margin);
+
+  const budgetPanel = document.createElement("div");
+  budgetPanel.className = "panel";
+  budgetPanel.innerHTML = `
+    <div class="row">
+      <label>가진 돈</label>
+      <input type="number" id="budget-input" value="${state.budget || ""}" placeholder="예: 15000" style="width:110px">
+      <span class="muted">위에서 고른 섬 조합 기준으로, 이 돈으로 최대 이익이 나도록 뭘 얼마나 살지 계산합니다.</span>
+    </div>
+    <div id="budget-result">${budgetPlanHTML(trades)}</div>
+  `;
+  main.appendChild(budgetPanel);
 
   const resultPanel = document.createElement("div");
   resultPanel.className = "panel";
@@ -313,6 +393,11 @@ function renderTradeTab(main) {
   document.getElementById("dest-select").addEventListener("change", (e) => {
     window.__tradeDest = e.target.value;
     render();
+  });
+  document.getElementById("budget-input").addEventListener("input", (e) => {
+    state.budget = Number(e.target.value) || 0;
+    saveState();
+    document.getElementById("budget-result").innerHTML = budgetPlanHTML(trades);
   });
 }
 
