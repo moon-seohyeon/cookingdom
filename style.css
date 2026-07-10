@@ -264,3 +264,13 @@ hr.sep {
   color: var(--text-dim);
   line-height: 1.5;
 }
+
+tr.route-row:hover td {
+  background: rgba(255, 203, 77, 0.12);
+}
+
+tr.route-row.selected td {
+  background: rgba(255, 203, 77, 0.22);
+  color: var(--accent);
+  font-weight: 700;
+}

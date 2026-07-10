@@ -1,6 +1,7 @@
 // 영광의 항로 무역 도우미 - 메인 로직
 
 const STORAGE_KEY = "glory_route_trade_tracker_v2";
+const MAX_ROUTE_LEN = 4; // 한 장(15턴) 동안 최대로 방문 가능한 섬 수
 
 function emptyGrid() {
   const grid = {};
@@ -23,6 +24,8 @@ function defaultState() {
     budget: 0,
     // 항해(내구도 소진 등)가 리셋돼도 사라지지 않는, 품목별 누적 가격 통계
     archivedPriceStats: {},
+    // 이번 항해 지도의 섬 배치(고리 순서). 1번째~6번째 섬이 실제 어느 섬인지. 항해가 리셋되면 지도가 바뀌므로 함께 초기화된다.
+    ringOrder: new Array(ISLANDS.length).fill(null),
   };
 }
 
@@ -36,6 +39,9 @@ function loadState() {
     if (!parsed.chapters || !parsed.chapters[1]) return defaultState();
     if (parsed.budget === undefined) parsed.budget = 0;
     if (!parsed.archivedPriceStats) parsed.archivedPriceStats = {};
+    if (!parsed.ringOrder || parsed.ringOrder.length !== ISLANDS.length) {
+      parsed.ringOrder = new Array(ISLANDS.length).fill(null);
+    }
     return parsed;
   } catch (e) {
     return defaultState();
@@ -115,7 +121,7 @@ function computeItemStats(itemName) {
 // 새 항해 시작: 이번 항해의 시세/구매기록은 지우되, 품목별 누적 평균 통계는 archivedPriceStats에 보관해 유지한다.
 function resetVoyage() {
   const ok = confirm(
-    "새 항해를 시작할까요?\n\n지금 입력된 이번 항해의 장별 시세와 구매 기록은 모두 사라집니다.\n(품목별 평균 가격 기록은 계속 유지됩니다)"
+    "새 항해를 시작할까요?\n\n지금 입력된 이번 항해의 장별 시세와 구매 기록, 섬 배치 정보가 모두 사라집니다.\n(품목별 평균 가격 기록은 계속 유지됩니다)"
   );
   if (!ok) return;
 
@@ -142,8 +148,10 @@ function resetVoyage() {
   state.chapters = { 1: { prices: emptyGrid(), notes: "" } };
   state.currentChapter = 1;
   state.ledger = [];
+  state.ringOrder = new Array(ISLANDS.length).fill(null);
   window.__tradeOrigin = null;
   window.__tradeDest = null;
+  window.__selectedRouteIdx = 0;
   saveState();
   activeTab = "price";
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "price"));
@@ -340,6 +348,148 @@ function renderPriceTab(main) {
 
 const ALL_OPTION = "__ALL__";
 
+// ---------- 섬 배치(고리 순서) & 최적 항로 계산 ----------
+// 항해 시작 시 배는 지도 한가운데서 출발해 6개 섬 중 아무 곳이나 첫 목적지로 갈 수 있고,
+// 그 다음부터는 최단거리 이동만 하므로 "고리(육각형)"로 이어진 양옆 섬으로만 움직인다고 가정한다.
+
+function ringOrderComplete() {
+  const order = state.ringOrder;
+  if (!order || order.length !== ISLANDS.length) return false;
+  if (order.some((v) => !v)) return false;
+  return new Set(order).size === order.length;
+}
+
+function neighborsOf(island) {
+  const order = state.ringOrder;
+  const idx = order.indexOf(island);
+  if (idx === -1) return [];
+  const n = order.length;
+  return [order[(idx - 1 + n) % n], order[(idx + 1) % n]];
+}
+
+// 첫 섬(6곳 중 아무 곳)에서 시작해, 그 뒤로는 근접섬으로만 이동하는 길이 maxLen짜리 경로를 모두 나열한다.
+function enumerateRoutes(maxLen) {
+  const routes = [];
+  function extend(path) {
+    if (path.length === maxLen) {
+      routes.push(path.slice());
+      return;
+    }
+    neighborsOf(path[path.length - 1]).forEach((next) => extend(path.concat([next])));
+  }
+  state.ringOrder.forEach((start) => extend([start]));
+  return routes;
+}
+
+// 어떤 항로를 따라갈 때, 한 정류장(stopIndex)에서 살 만한 품목들을 ROI(마진/구매가) 순으로 예산과 재고가
+// 허락하는 만큼 담는다. 각 품목은 이 항로에서 앞으로 남은 정류장 중 판매가가 가장 높은 곳에서 팔 것으로 계획한다.
+// 재고는 "구매"만 제한하고 "판매"는 무제한이라고 가정한다 (섬에 도착 전 살 수 있는 재고만 stock으로 기록되므로).
+function planStopPurchases(chapterData, remainingStock, island, route, stopIndex, cash) {
+  const candidates = [];
+  ITEMS.forEach((it) => {
+    if (it.exclusive && it.exclusive !== island) return;
+    const buyCell = chapterData.prices[it.name][island];
+    if (buyCell.buy === null || buyCell.buy === undefined) return;
+    const stockLeft = remainingStock[it.name][island];
+    if (stockLeft !== null && stockLeft !== undefined && stockLeft <= 0) return;
+
+    let bestSell = null;
+    let bestIdx = null;
+    for (let j = stopIndex + 1; j < route.length; j++) {
+      const sellCell = chapterData.prices[it.name][route[j]];
+      if (sellCell && sellCell.sell !== null && sellCell.sell !== undefined) {
+        if (bestSell === null || sellCell.sell > bestSell) {
+          bestSell = sellCell.sell;
+          bestIdx = j;
+        }
+      }
+    }
+    if (bestSell === null) return; // 이 항로에서는 팔 곳이 없음
+    const margin = bestSell - buyCell.buy;
+    if (margin <= 0) return;
+    candidates.push({ item: it, buyPrice: buyCell.buy, stockLeft, sellPrice: bestSell, sellIdx: bestIdx, margin });
+  });
+
+  candidates.sort((a, b) => b.margin / b.buyPrice - a.margin / a.buyPrice);
+
+  let remaining = cash;
+  const picks = [];
+  candidates.forEach((c) => {
+    if (remaining < c.buyPrice) return;
+    const maxByStock = c.stockLeft === null || c.stockLeft === undefined ? Infinity : c.stockLeft;
+    const maxByBudget = Math.floor(remaining / c.buyPrice);
+    const qty = Math.min(maxByStock, maxByBudget);
+    if (qty <= 0) return;
+    const cost = qty * c.buyPrice;
+    picks.push({ ...c, qty, cost });
+    remaining -= cost;
+  });
+  return { picks, remaining };
+}
+
+// 정해진 항로를 순서대로 따라가며: (1) 이 정류장에서 팔기로 예정된 것들을 먼저 팔아 현금화하고,
+// (2) 그 현금으로 다시 그리디하게 사들이는 과정을 시뮬레이션한다. 같은 섬을 다시 들르면(예: 3→4→3→2)
+// 첫 방문 때 산 만큼 재고가 줄어든 상태로 반영된다.
+function simulateRoute(chapterData, route, startBudget) {
+  const remainingStock = {};
+  ITEMS.forEach((it) => {
+    remainingStock[it.name] = {};
+    ISLANDS.forEach((isl) => {
+      remainingStock[it.name][isl] = chapterData.prices[it.name][isl].stock;
+    });
+  });
+
+  let cash = startBudget;
+  let holdings = [];
+  const steps = [];
+
+  route.forEach((island, idx) => {
+    const sellsHere = holdings.filter((h) => h.sellIdx === idx);
+    holdings = holdings.filter((h) => h.sellIdx !== idx);
+    const sellRecords = sellsHere.map((h) => {
+      const revenue = h.qty * h.sellPrice;
+      cash += revenue;
+      return {
+        item: h.item.name,
+        qty: h.qty,
+        buyIsland: h.buyIsland,
+        buyPrice: h.buyPrice,
+        sellPrice: h.sellPrice,
+        revenue,
+        profit: revenue - h.qty * h.buyPrice,
+      };
+    });
+
+    const { picks, remaining } = planStopPurchases(chapterData, remainingStock, island, route, idx, cash);
+    picks.forEach((p) => {
+      remainingStock[p.item.name][island] -= p.qty;
+      holdings.push({ item: p.item, qty: p.qty, buyPrice: p.buyPrice, buyIsland: island, sellIdx: p.sellIdx, sellPrice: p.sellPrice });
+    });
+    cash = remaining;
+
+    steps.push({
+      island,
+      sells: sellRecords,
+      buys: picks.map((p) => ({
+        item: p.item.name,
+        qty: p.qty,
+        buyPrice: p.buyPrice,
+        cost: p.cost,
+        sellIsland: route[p.sellIdx],
+        sellPrice: p.sellPrice,
+      })),
+      cashAfter: cash,
+    });
+  });
+
+  return { route, steps, finalCash: cash, profit: cash - startBudget };
+}
+
+function findBestRoutes(chapterData, budget, maxLen) {
+  const routes = enumerateRoutes(maxLen);
+  return routes.map((route) => simulateRoute(chapterData, route, budget)).sort((a, b) => b.finalCash - a.finalCash);
+}
+
 function bestTradeForItem(chapterData, item, originFilter, destFilter) {
   const grid = chapterData.prices[item.name];
   const origins = originFilter === ALL_OPTION ? ISLANDS : [originFilter];
@@ -436,12 +586,190 @@ function budgetPlanHTML(trades) {
   `;
 }
 
+// ---------- 섬 배치 입력 + 최적 항로 추천 UI ----------
+
+function ringOrderPanelHTML() {
+  const order = state.ringOrder;
+  const counts = {};
+  order.forEach((v) => {
+    if (v) counts[v] = (counts[v] || 0) + 1;
+  });
+  const hasDup = Object.values(counts).some((c) => c > 1);
+
+  return `
+    <h3 style="margin-top:0;color:var(--accent-2)">🗺️ 이번 항해 섬 배치</h3>
+    <p class="hint">배는 항해 시작 시 지도 한가운데서 출발해 6개 섬 중 아무 곳이나 먼저 갈 수 있고, 그 다음부터는 고리(육각형)로 이어진 양옆 근접섬으로만 최단거리 이동을 합니다. 1번째 섬부터 6번째 섬까지, 실제로 어느 섬인지 순서대로 골라서 알려주세요 (예: 1번=농부들의 섬, 2번=목동들의 섬이면 두 섬은 서로 근접섬). 새 항해를 시작하면 지도가 바뀌므로 다시 설정해야 합니다.</p>
+    <div class="row" style="flex-wrap:wrap;gap:10px">
+      ${order
+        .map(
+          (v, i) => `
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <label style="font-size:0.75rem">${i + 1}번째 섬</label>
+          <select data-ring-idx="${i}">
+            <option value="">선택</option>
+            ${ISLANDS.map((isl) => `<option value="${isl}" ${v === isl ? "selected" : ""}>${isl}</option>`).join("")}
+          </select>
+        </div>
+      `
+        )
+        .join("")}
+    </div>
+    ${hasDup ? `<p class="hint" style="color:var(--bad)">⚠️ 같은 섬이 두 번 이상 선택됐습니다. 서로 다른 섬 6개를 선택하세요.</p>` : ""}
+  `;
+}
+
+function routeStepsHTML(result, startBudget) {
+  return `
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>순서</th><th>섬</th><th>여기서 팔기</th><th>여기서 사기</th><th>떠날 때 보유 현금</th></tr></thead>
+        <tbody>
+          ${result.steps
+            .map(
+              (s, i) => `<tr>
+            <td>${i + 1}</td>
+            <td><strong>${s.island}</strong></td>
+            <td style="text-align:left">${
+              s.sells.length
+                ? s.sells
+                    .map(
+                      (se) =>
+                        `${se.item} ${se.qty}개 (${se.buyIsland} ${fmt(se.buyPrice)} → 여기 ${fmt(se.sellPrice)}) <span class="profit-pos">+${fmt(se.profit)}</span>`
+                    )
+                    .join("<br>")
+                : "-"
+            }</td>
+            <td style="text-align:left">${
+              s.buys.length
+                ? s.buys.map((b) => `${b.item} ${b.qty}개 (개당 ${fmt(b.buyPrice)}) → ${b.sellIsland}에서 판매 예정`).join("<br>")
+                : "-"
+            }</td>
+            <td>${fmt(s.cashAfter)}</td>
+          </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="summary-cards" style="margin-top:10px">
+      <div class="card"><div class="label">시작 자금</div><div class="value">${fmt(startBudget)}</div></div>
+      <div class="card"><div class="label">최종 현금</div><div class="value">${fmt(result.finalCash)}</div></div>
+      <div class="card"><div class="label">순이익</div><div class="value ${result.profit >= 0 ? "profit-pos" : "profit-neg"}">${
+    result.profit >= 0 ? "+" : ""
+  }${fmt(result.profit)}</div></div>
+    </div>
+  `;
+}
+
+function routeRecommendationBodyHTML(chapterData) {
+  if (!ringOrderComplete()) {
+    return `<p class="muted">위에서 6개 섬 배치를 서로 다르게 모두 선택하면, 최적 시작섬과 연속 거래 항로를 계산해줍니다.</p>`;
+  }
+  const budget = state.budget || 0;
+  if (!budget) {
+    return `<p class="muted">아래 "가진 돈"을 입력하면, 이 예산 기준으로 최적 항로를 계산해줍니다.</p>`;
+  }
+
+  const allRoutes = findBestRoutes(chapterData, budget, MAX_ROUTE_LEN);
+  if (!allRoutes.length) return `<p class="muted">계산할 항로가 없습니다.</p>`;
+
+  const byStartMap = {};
+  allRoutes.forEach((r) => {
+    const start = r.route[0];
+    if (!byStartMap[start] || r.finalCash > byStartMap[start].finalCash) byStartMap[start] = r;
+  });
+  const byStart = Object.values(byStartMap).sort((a, b) => b.finalCash - a.finalCash);
+
+  const topRoutes = allRoutes.slice(0, 5);
+  let selIdx = window.__selectedRouteIdx || 0;
+  if (selIdx >= topRoutes.length) selIdx = 0;
+  const selected = topRoutes[selIdx];
+
+  return `
+    <div class="summary-cards">
+      <div class="card"><div class="label">추천 시작섬</div><div class="value" style="font-size:1.3rem">${allRoutes[0].route[0]}</div></div>
+      <div class="card"><div class="label">추천 항로</div><div class="value" style="font-size:1rem">${allRoutes[0].route.join(" → ")}</div></div>
+      <div class="card"><div class="label">예상 순이익 (${fmt(budget)} 기준)</div><div class="value profit-pos">+${fmt(allRoutes[0].profit)}</div></div>
+    </div>
+
+    <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (같은 예산 기준)</h4>
+    <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 뒤로 이어지는 최선의 항로와 함께 비교합니다.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>순위</th><th>시작섬</th><th>이어지는 최적 항로</th><th>순이익</th></tr></thead>
+        <tbody>
+          ${byStart
+            .map(
+              (r, i) => `<tr>
+            <td>${i + 1}</td>
+            <td><strong>${r.route[0]}</strong></td>
+            <td>${r.route.join(" → ")}</td>
+            <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
+          </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <h4 style="color:var(--accent);margin-top:16px;margin-bottom:6px">상위 항로 후보 (눌러서 상세 보기)</h4>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>순위</th><th>항로</th><th>순이익</th></tr></thead>
+        <tbody>
+          ${topRoutes
+            .map(
+              (r, i) => `<tr data-route-idx="${i}" class="route-row${i === selIdx ? " selected" : ""}" style="cursor:pointer">
+            <td>${i + 1}</td>
+            <td>${r.route.join(" → ")}</td>
+            <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
+          </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <h4 style="color:var(--accent-2);margin-top:16px">선택한 항로 상세: ${selected.route.join(" → ")}</h4>
+    ${routeStepsHTML(selected, budget)}
+    <p class="hint">※ 같은 섬을 다시 들르는 경로(예: 3번째→4번째→3번째→2번째)는 첫 방문 때 산 만큼 재고가 줄어든 상태로 계산에 반영됩니다. 판매는 재고와 무관하게 언제든 가능하다고 가정합니다.</p>
+  `;
+}
+
 function renderTradeTab(main) {
   const cur = state.currentChapter;
   const chapterData = getChapter(cur);
 
   const originSel = window.__tradeOrigin || ALL_OPTION;
   const destSel = window.__tradeDest || ALL_OPTION;
+
+  const trades = [];
+  ITEMS.forEach((it) => {
+    const best = bestTradeForItem(chapterData, it, originSel, destSel);
+    if (!best || best.margin <= -999999) return;
+    trades.push({ item: it, best });
+  });
+  trades.sort((a, b) => b.best.margin - a.best.margin);
+
+  const budgetPanel = document.createElement("div");
+  budgetPanel.className = "panel";
+  budgetPanel.innerHTML = `
+    <div class="row">
+      <label>가진 돈</label>
+      <input type="number" id="budget-input" value="${state.budget || ""}" placeholder="예: 15000" style="width:110px">
+      <span class="muted">아래 항로 추천과 예산 기반 구매 추천 모두 이 금액을 기준으로 계산합니다.</span>
+    </div>
+  `;
+  main.appendChild(budgetPanel);
+
+  const routePanel = document.createElement("div");
+  routePanel.className = "panel";
+  routePanel.innerHTML = `
+    ${ringOrderPanelHTML()}
+    <hr class="sep">
+    <div id="route-panel-body">${routeRecommendationBodyHTML(chapterData)}</div>
+  `;
+  main.appendChild(routePanel);
 
   const panel = document.createElement("div");
   panel.className = "panel";
@@ -458,17 +786,9 @@ function renderTradeTab(main) {
         ${ISLANDS.map((isl) => `<option value="${isl}" ${isl === destSel ? "selected" : ""}>${isl}</option>`).join("")}
       </select>
     </div>
-    <p class="hint">지금 있는 섬과 다음에 갈 섬을 고르면, 거기서 사서 저기서 팔았을 때 이득이 큰 순서대로 정렬해줘요. 아직 못 정했으면 "전체"로 두면 가능한 모든 조합 중 최선을 찾아줍니다.</p>
+    <p class="hint">한 구간(한 섬에서 사서 바로 다음 섬에서 파는 것)만 따로 확인하고 싶을 때 쓰는 도구예요. 여러 섬을 잇는 전체 항로 추천은 위 "🗺️ 이번 항해 섬 배치" 결과를 참고하세요.</p>
   `;
   main.appendChild(panel);
-
-  const trades = [];
-  ITEMS.forEach((it) => {
-    const best = bestTradeForItem(chapterData, it, originSel, destSel);
-    if (!best || best.margin <= -999999) return;
-    trades.push({ item: it, best });
-  });
-  trades.sort((a, b) => b.best.margin - a.best.margin);
 
   const stockpilePanel = document.createElement("div");
   stockpilePanel.className = "panel";
@@ -524,17 +844,14 @@ function renderTradeTab(main) {
   }
   main.appendChild(stockpilePanel);
 
-  const budgetPanel = document.createElement("div");
-  budgetPanel.className = "panel";
-  budgetPanel.innerHTML = `
-    <div class="row">
-      <label>가진 돈</label>
-      <input type="number" id="budget-input" value="${state.budget || ""}" placeholder="예: 15000" style="width:110px">
-      <span class="muted">위에서 고른 섬 조합 기준으로, 이 돈으로 최대 이익이 나도록 뭘 얼마나 살지 계산합니다.</span>
-    </div>
+  const singleLegBudgetPanel = document.createElement("div");
+  singleLegBudgetPanel.className = "panel";
+  singleLegBudgetPanel.innerHTML = `
+    <h3 style="margin-top:0;color:var(--accent)">이 구간만 볼 때, 예산 안에서 뭘 살지</h3>
+    <p class="muted">위에서 고른 "지금 있는 섬 → 다음에 갈 섬" 조합 기준으로, 가진 돈 안에서 최대 이익이 나도록 뭘 얼마나 살지 계산합니다.</p>
     <div id="budget-result">${budgetPlanHTML(trades)}</div>
   `;
-  main.appendChild(budgetPanel);
+  main.appendChild(singleLegBudgetPanel);
 
   const resultPanel = document.createElement("div");
   resultPanel.className = "panel";
@@ -597,6 +914,32 @@ function renderTradeTab(main) {
     state.budget = Number(e.target.value) || 0;
     saveState();
     document.getElementById("budget-result").innerHTML = budgetPlanHTML(trades);
+    const routeBody = document.getElementById("route-panel-body");
+    if (routeBody) routeBody.innerHTML = routeRecommendationBodyHTML(chapterData);
+    wireRoutePanelEvents(chapterData);
+  });
+
+  document.querySelectorAll("select[data-ring-idx]").forEach((sel) => {
+    sel.addEventListener("change", (e) => {
+      const idx = Number(e.target.dataset.ringIdx);
+      state.ringOrder[idx] = e.target.value || null;
+      window.__selectedRouteIdx = 0;
+      saveState();
+      render();
+    });
+  });
+
+  wireRoutePanelEvents(chapterData);
+}
+
+function wireRoutePanelEvents(chapterData) {
+  document.querySelectorAll("[data-route-idx]").forEach((el) => {
+    el.addEventListener("click", () => {
+      window.__selectedRouteIdx = Number(el.dataset.routeIdx);
+      const routeBody = document.getElementById("route-panel-body");
+      if (routeBody) routeBody.innerHTML = routeRecommendationBodyHTML(chapterData);
+      wireRoutePanelEvents(chapterData);
+    });
   });
 }
 
