@@ -26,6 +26,8 @@ function defaultState() {
     archivedPriceStats: {},
     // 이번 항해 지도의 섬 배치(고리 순서). 1번째~6번째 섬이 실제 어느 섬인지. 항해가 리셋되면 지도가 바뀌므로 함께 초기화된다.
     ringOrder: new Array(ISLANDS.length).fill(null),
+    // 이번 장에서 실제로 몇 개 섬을 돌 예정인지 (턴이 부족해 3개만 돌 수도 있음)
+    routeVisitCount: MAX_ROUTE_LEN,
   };
 }
 
@@ -42,6 +44,7 @@ function loadState() {
     if (!parsed.ringOrder || parsed.ringOrder.length !== ISLANDS.length) {
       parsed.ringOrder = new Array(ISLANDS.length).fill(null);
     }
+    if (!parsed.routeVisitCount) parsed.routeVisitCount = MAX_ROUTE_LEN;
     return parsed;
   } catch (e) {
     return defaultState();
@@ -670,7 +673,8 @@ function routeRecommendationBodyHTML(chapterData) {
     return `<p class="muted">아래 "가진 돈"을 입력하면, 이 예산 기준으로 최적 항로를 계산해줍니다.</p>`;
   }
 
-  const allRoutes = findBestRoutes(chapterData, budget, MAX_ROUTE_LEN);
+  const visitCount = state.routeVisitCount || MAX_ROUTE_LEN;
+  const allRoutes = findBestRoutes(chapterData, budget, visitCount);
   if (!allRoutes.length) return `<p class="muted">계산할 항로가 없습니다.</p>`;
 
   const byStartMap = {};
@@ -688,11 +692,11 @@ function routeRecommendationBodyHTML(chapterData) {
   return `
     <div class="summary-cards">
       <div class="card"><div class="label">추천 시작섬</div><div class="value" style="font-size:1.3rem">${allRoutes[0].route[0]}</div></div>
-      <div class="card"><div class="label">추천 항로</div><div class="value" style="font-size:1rem">${allRoutes[0].route.join(" → ")}</div></div>
+      <div class="card"><div class="label">추천 항로 (${visitCount}개 섬)</div><div class="value" style="font-size:1rem">${allRoutes[0].route.join(" → ")}</div></div>
       <div class="card"><div class="label">예상 순이익 (${fmt(budget)} 기준)</div><div class="value profit-pos">+${fmt(allRoutes[0].profit)}</div></div>
     </div>
 
-    <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (같은 예산 기준)</h4>
+    <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (${visitCount}개 섬 기준, 같은 예산)</h4>
     <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 뒤로 이어지는 최선의 항로와 함께 비교합니다.</p>
     <div class="table-wrap" style="max-height:none">
       <table>
@@ -767,6 +771,15 @@ function renderTradeTab(main) {
   routePanel.innerHTML = `
     ${ringOrderPanelHTML()}
     <hr class="sep">
+    <div class="row">
+      <label>이번 장, 몇 개 섬을 돌 예정인가요?</label>
+      <select id="route-visit-count">
+        ${[2, 3, 4]
+          .map((n) => `<option value="${n}" ${n === (state.routeVisitCount || MAX_ROUTE_LEN) ? "selected" : ""}>${n}개 섬</option>`)
+          .join("")}
+      </select>
+      <span class="muted">턴이 부족해서 3개 섬만 돌 계획이면 "3개 섬"을 골라보세요. 그 기준으로 최적 항로를 다시 계산합니다.</span>
+    </div>
     <div id="route-panel-body">${routeRecommendationBodyHTML(chapterData)}</div>
   `;
   main.appendChild(routePanel);
@@ -927,6 +940,13 @@ function renderTradeTab(main) {
       saveState();
       render();
     });
+  });
+
+  document.getElementById("route-visit-count").addEventListener("change", (e) => {
+    state.routeVisitCount = Number(e.target.value);
+    window.__selectedRouteIdx = 0;
+    saveState();
+    render();
   });
 
   wireRoutePanelEvents(chapterData);
