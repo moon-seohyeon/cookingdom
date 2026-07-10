@@ -155,7 +155,7 @@ function resetVoyage() {
   state.ringOrder = new Array(ISLANDS.length).fill(null);
   window.__tradeOrigin = null;
   window.__tradeDest = null;
-  window.__selectedRouteIdx = 0;
+  window.__selectedRouteKey = null;
   saveState();
   activeTab = "price";
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "price"));
@@ -668,6 +668,17 @@ function routeStepsHTML(result, startBudget) {
   `;
 }
 
+function routeKey(route) {
+  return route.join("|");
+}
+
+// 항로의 첫 정류장에서 뭘 사야 하는지 짧게 미리 보여준다 (표 안에서 바로 확인용).
+function firstStopBuyPreviewHTML(route) {
+  const buys = route.steps[0].buys;
+  if (!buys.length) return `<span class="muted">-</span>`;
+  return buys.map((b) => `${b.item} ${b.qty}개`).join("<br>");
+}
+
 function routeRecommendationBodyHTML(chapterData) {
   if (!ringOrderComplete()) {
     return `<p class="muted">위에서 6개 섬 배치를 서로 다르게 모두 선택하면, 최적 시작섬과 연속 거래 항로를 계산해줍니다.</p>`;
@@ -683,9 +694,8 @@ function routeRecommendationBodyHTML(chapterData) {
   if (!allRoutes.length) return `<p class="muted">계산할 항로가 없습니다.</p>`;
 
   const topRoutes = allRoutes.slice(0, 5);
-  let selIdx = window.__selectedRouteIdx || 0;
-  if (selIdx >= topRoutes.length) selIdx = 0;
-  const selected = topRoutes[selIdx];
+  const selectedKey = window.__selectedRouteKey || routeKey(allRoutes[0].route);
+  const selected = allRoutes.find((r) => routeKey(r.route) === selectedKey) || allRoutes[0];
 
   let byStartSectionHTML = "";
   if (!fixedStart) {
@@ -697,17 +707,18 @@ function routeRecommendationBodyHTML(chapterData) {
     const byStart = Object.values(byStartMap).sort((a, b) => b.finalCash - a.finalCash);
     byStartSectionHTML = `
       <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (${visitCount}개 섬 기준, 같은 예산)</h4>
-      <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 뒤로 이어지는 최선의 항로와 함께 비교합니다. 이미 특정 섬에 있다면 위에서 "지금 배가 있는 섬"을 골라서 그 섬 기준 항로만 보세요.</p>
+      <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 섬에서 뭘 사야 하는지까지 함께 비교합니다. 행을 누르면 아래 상세에서 전체 항로를 볼 수 있어요.</p>
       <div class="table-wrap" style="max-height:none">
         <table>
-          <thead><tr><th>순위</th><th>시작섬</th><th>이어지는 최적 항로</th><th>순이익</th></tr></thead>
+          <thead><tr><th>순위</th><th>시작섬</th><th>이어지는 최적 항로</th><th>이 섬에서 살 것</th><th>순이익</th></tr></thead>
           <tbody>
             ${byStart
               .map(
-                (r, i) => `<tr>
+                (r, i) => `<tr data-route-key="${routeKey(r.route)}" class="route-row${routeKey(r.route) === selectedKey ? " selected" : ""}" style="cursor:pointer">
               <td>${i + 1}</td>
               <td><strong>${r.route[0]}</strong></td>
               <td>${r.route.join(" → ")}</td>
+              <td style="text-align:left">${firstStopBuyPreviewHTML(r)}</td>
               <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
             </tr>`
               )
@@ -724,6 +735,7 @@ function routeRecommendationBodyHTML(chapterData) {
       <div class="card"><div class="label">추천 항로 (${visitCount}개 섬)</div><div class="value" style="font-size:1rem">${allRoutes[0].route.join(" → ")}</div></div>
       <div class="card"><div class="label">예상 순이익 (${fmt(budget)} 기준)</div><div class="value profit-pos">+${fmt(allRoutes[0].profit)}</div></div>
     </div>
+    <p class="hint">👉 ${allRoutes[0].route[0]}에 도착하면 살 것: ${firstStopBuyPreviewHTML(allRoutes[0]).replace(/<br>/g, ", ")}</p>
 
     ${byStartSectionHTML}
 
@@ -732,13 +744,14 @@ function routeRecommendationBodyHTML(chapterData) {
     }</h4>
     <div class="table-wrap" style="max-height:none">
       <table>
-        <thead><tr><th>순위</th><th>항로</th><th>순이익</th></tr></thead>
+        <thead><tr><th>순위</th><th>항로</th><th>첫 섬에서 살 것</th><th>순이익</th></tr></thead>
         <tbody>
           ${topRoutes
             .map(
-              (r, i) => `<tr data-route-idx="${i}" class="route-row${i === selIdx ? " selected" : ""}" style="cursor:pointer">
+              (r, i) => `<tr data-route-key="${routeKey(r.route)}" class="route-row${routeKey(r.route) === selectedKey ? " selected" : ""}" style="cursor:pointer">
             <td>${i + 1}</td>
             <td>${r.route.join(" → ")}</td>
+            <td style="text-align:left">${firstStopBuyPreviewHTML(r)}</td>
             <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
           </tr>`
             )
@@ -957,7 +970,7 @@ function renderTradeTab(main) {
     sel.addEventListener("change", (e) => {
       const idx = Number(e.target.dataset.ringIdx);
       state.ringOrder[idx] = e.target.value || null;
-      window.__selectedRouteIdx = 0;
+      window.__selectedRouteKey = null;
       saveState();
       render();
     });
@@ -965,14 +978,14 @@ function renderTradeTab(main) {
 
   document.getElementById("route-visit-count").addEventListener("change", (e) => {
     state.routeVisitCount = Number(e.target.value);
-    window.__selectedRouteIdx = 0;
+    window.__selectedRouteKey = null;
     saveState();
     render();
   });
 
   document.getElementById("route-start-island").addEventListener("change", (e) => {
     chapterData.startIsland = e.target.value || null;
-    window.__selectedRouteIdx = 0;
+    window.__selectedRouteKey = null;
     saveState();
     render();
   });
@@ -981,9 +994,9 @@ function renderTradeTab(main) {
 }
 
 function wireRoutePanelEvents(chapterData) {
-  document.querySelectorAll("[data-route-idx]").forEach((el) => {
+  document.querySelectorAll("[data-route-key]").forEach((el) => {
     el.addEventListener("click", () => {
-      window.__selectedRouteIdx = Number(el.dataset.routeIdx);
+      window.__selectedRouteKey = el.dataset.routeKey;
       const routeBody = document.getElementById("route-panel-body");
       if (routeBody) routeBody.innerHTML = routeRecommendationBodyHTML(chapterData);
       wireRoutePanelEvents(chapterData);
