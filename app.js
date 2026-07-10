@@ -18,7 +18,7 @@ function defaultState() {
   return {
     currentChapter: 1,
     chapters: {
-      1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "" },
+      1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "", startIsland: null },
     },
     ledger: [],
     budget: 0,
@@ -57,8 +57,9 @@ function saveState() {
 
 function getChapter(num) {
   if (!state.chapters[num]) {
-    state.chapters[num] = { prices: emptyGrid(), notes: "" };
+    state.chapters[num] = { prices: emptyGrid(), notes: "", startIsland: null };
   }
+  if (state.chapters[num].startIsland === undefined) state.chapters[num].startIsland = null;
   return state.chapters[num];
 }
 
@@ -148,7 +149,7 @@ function resetVoyage() {
     });
   });
 
-  state.chapters = { 1: { prices: emptyGrid(), notes: "" } };
+  state.chapters = { 1: { prices: emptyGrid(), notes: "", startIsland: null } };
   state.currentChapter = 1;
   state.ledger = [];
   state.ringOrder = new Array(ISLANDS.length).fill(null);
@@ -370,8 +371,10 @@ function neighborsOf(island) {
   return [order[(idx - 1 + n) % n], order[(idx + 1) % n]];
 }
 
-// 첫 섬(6곳 중 아무 곳)에서 시작해, 그 뒤로는 근접섬으로만 이동하는 길이 maxLen짜리 경로를 모두 나열한다.
-function enumerateRoutes(maxLen) {
+// 첫 섬에서 시작해(고정 출발섬이 없으면 6곳 중 아무 곳이나), 그 뒤로는 근접섬으로만 이동하는
+// 길이 maxLen짜리 경로를 모두 나열한다. fixedStart를 주면 그 섬에서 출발하는 경로만 나열한다
+// (지난 장 마지막에 도착해 있던 섬에서 이번 장을 시작하는 경우).
+function enumerateRoutes(maxLen, fixedStart) {
   const routes = [];
   function extend(path) {
     if (path.length === maxLen) {
@@ -380,7 +383,8 @@ function enumerateRoutes(maxLen) {
     }
     neighborsOf(path[path.length - 1]).forEach((next) => extend(path.concat([next])));
   }
-  state.ringOrder.forEach((start) => extend([start]));
+  const starts = fixedStart ? [fixedStart] : state.ringOrder;
+  starts.forEach((start) => extend([start]));
   return routes;
 }
 
@@ -488,8 +492,8 @@ function simulateRoute(chapterData, route, startBudget) {
   return { route, steps, finalCash: cash, profit: cash - startBudget };
 }
 
-function findBestRoutes(chapterData, budget, maxLen) {
-  const routes = enumerateRoutes(maxLen);
+function findBestRoutes(chapterData, budget, maxLen, fixedStart) {
+  const routes = enumerateRoutes(maxLen, fixedStart);
   return routes.map((route) => simulateRoute(chapterData, route, budget)).sort((a, b) => b.finalCash - a.finalCash);
 }
 
@@ -674,49 +678,58 @@ function routeRecommendationBodyHTML(chapterData) {
   }
 
   const visitCount = state.routeVisitCount || MAX_ROUTE_LEN;
-  const allRoutes = findBestRoutes(chapterData, budget, visitCount);
+  const fixedStart = chapterData.startIsland || null;
+  const allRoutes = findBestRoutes(chapterData, budget, visitCount, fixedStart);
   if (!allRoutes.length) return `<p class="muted">계산할 항로가 없습니다.</p>`;
-
-  const byStartMap = {};
-  allRoutes.forEach((r) => {
-    const start = r.route[0];
-    if (!byStartMap[start] || r.finalCash > byStartMap[start].finalCash) byStartMap[start] = r;
-  });
-  const byStart = Object.values(byStartMap).sort((a, b) => b.finalCash - a.finalCash);
 
   const topRoutes = allRoutes.slice(0, 5);
   let selIdx = window.__selectedRouteIdx || 0;
   if (selIdx >= topRoutes.length) selIdx = 0;
   const selected = topRoutes[selIdx];
 
+  let byStartSectionHTML = "";
+  if (!fixedStart) {
+    const byStartMap = {};
+    allRoutes.forEach((r) => {
+      const start = r.route[0];
+      if (!byStartMap[start] || r.finalCash > byStartMap[start].finalCash) byStartMap[start] = r;
+    });
+    const byStart = Object.values(byStartMap).sort((a, b) => b.finalCash - a.finalCash);
+    byStartSectionHTML = `
+      <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (${visitCount}개 섬 기준, 같은 예산)</h4>
+      <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 뒤로 이어지는 최선의 항로와 함께 비교합니다. 이미 특정 섬에 있다면 위에서 "지금 배가 있는 섬"을 골라서 그 섬 기준 항로만 보세요.</p>
+      <div class="table-wrap" style="max-height:none">
+        <table>
+          <thead><tr><th>순위</th><th>시작섬</th><th>이어지는 최적 항로</th><th>순이익</th></tr></thead>
+          <tbody>
+            ${byStart
+              .map(
+                (r, i) => `<tr>
+              <td>${i + 1}</td>
+              <td><strong>${r.route[0]}</strong></td>
+              <td>${r.route.join(" → ")}</td>
+              <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
+            </tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
   return `
     <div class="summary-cards">
-      <div class="card"><div class="label">추천 시작섬</div><div class="value" style="font-size:1.3rem">${allRoutes[0].route[0]}</div></div>
+      <div class="card"><div class="label">${fixedStart ? "출발섬 (고정)" : "추천 시작섬"}</div><div class="value" style="font-size:1.3rem">${allRoutes[0].route[0]}</div></div>
       <div class="card"><div class="label">추천 항로 (${visitCount}개 섬)</div><div class="value" style="font-size:1rem">${allRoutes[0].route.join(" → ")}</div></div>
       <div class="card"><div class="label">예상 순이익 (${fmt(budget)} 기준)</div><div class="value profit-pos">+${fmt(allRoutes[0].profit)}</div></div>
     </div>
 
-    <h4 style="color:var(--accent);margin-bottom:6px">시작섬별 최고 효율 비교 (${visitCount}개 섬 기준, 같은 예산)</h4>
-    <p class="hint">배가 한가운데서 출발할 때 어느 섬으로 먼저 가는 것이 가장 유리한지, 그 뒤로 이어지는 최선의 항로와 함께 비교합니다.</p>
-    <div class="table-wrap" style="max-height:none">
-      <table>
-        <thead><tr><th>순위</th><th>시작섬</th><th>이어지는 최적 항로</th><th>순이익</th></tr></thead>
-        <tbody>
-          ${byStart
-            .map(
-              (r, i) => `<tr>
-            <td>${i + 1}</td>
-            <td><strong>${r.route[0]}</strong></td>
-            <td>${r.route.join(" → ")}</td>
-            <td class="${r.profit >= 0 ? "profit-pos" : "profit-neg"}">${r.profit >= 0 ? "+" : ""}${fmt(r.profit)}</td>
-          </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
+    ${byStartSectionHTML}
 
-    <h4 style="color:var(--accent);margin-top:16px;margin-bottom:6px">상위 항로 후보 (눌러서 상세 보기)</h4>
+    <h4 style="color:var(--accent);margin-top:16px;margin-bottom:6px">${
+      fixedStart ? `${fixedStart}에서 출발하는 상위 항로 후보 (눌러서 상세 보기)` : "상위 항로 후보 (눌러서 상세 보기)"
+    }</h4>
     <div class="table-wrap" style="max-height:none">
       <table>
         <thead><tr><th>순위</th><th>항로</th><th>순이익</th></tr></thead>
@@ -771,6 +784,14 @@ function renderTradeTab(main) {
   routePanel.innerHTML = `
     ${ringOrderPanelHTML()}
     <hr class="sep">
+    <div class="row">
+      <label>${cur}장 · 지금 배가 있는 섬 (이번 장 시작 위치)</label>
+      <select id="route-start-island">
+        <option value="" ${!chapterData.startIsland ? "selected" : ""}>처음 시작 (한가운데, 아무 섬이나 가능)</option>
+        ${ISLANDS.map((isl) => `<option value="${isl}" ${chapterData.startIsland === isl ? "selected" : ""}>${isl}</option>`).join("")}
+      </select>
+      <span class="muted">지난 장 마지막에 도착해 있던 섬을 고르면, 그 섬에서 출발하는 항로만 추천합니다. 항해 맨 처음(1장 시작)이면 "처음 시작"으로 두세요.</span>
+    </div>
     <div class="row">
       <label>이번 장, 몇 개 섬을 돌 예정인가요?</label>
       <select id="route-visit-count">
@@ -944,6 +965,13 @@ function renderTradeTab(main) {
 
   document.getElementById("route-visit-count").addEventListener("change", (e) => {
     state.routeVisitCount = Number(e.target.value);
+    window.__selectedRouteIdx = 0;
+    saveState();
+    render();
+  });
+
+  document.getElementById("route-start-island").addEventListener("change", (e) => {
+    chapterData.startIsland = e.target.value || null;
     window.__selectedRouteIdx = 0;
     saveState();
     render();
