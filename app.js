@@ -155,6 +155,7 @@ function resetVoyage() {
   state.currentChapter = 1;
   state.ledger = [];
   state.ringOrder = new Array(ISLANDS.length).fill(null);
+  state.budget = 15000;
   window.__tradeOrigin = null;
   window.__tradeDest = null;
   window.__selectedRouteKey = null;
