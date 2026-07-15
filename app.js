@@ -18,7 +18,7 @@ function defaultState() {
   return {
     currentChapter: 1,
     chapters: {
-      1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "", startIsland: null },
+      1: { prices: JSON.parse(JSON.stringify(SEED_CHAPTER_1)), notes: "", startIsland: null, commissions: [], currentCargo: [] },
     },
     ledger: [],
     budget: 0,
@@ -57,9 +57,11 @@ function saveState() {
 
 function getChapter(num) {
   if (!state.chapters[num]) {
-    state.chapters[num] = { prices: emptyGrid(), notes: "", startIsland: null };
+    state.chapters[num] = { prices: emptyGrid(), notes: "", startIsland: null, commissions: [], currentCargo: [] };
   }
   if (state.chapters[num].startIsland === undefined) state.chapters[num].startIsland = null;
+  if (!state.chapters[num].commissions) state.chapters[num].commissions = [];
+  if (!state.chapters[num].currentCargo) state.chapters[num].currentCargo = [];
   return state.chapters[num];
 }
 
@@ -149,13 +151,15 @@ function resetVoyage() {
     });
   });
 
-  state.chapters = { 1: { prices: emptyGrid(), notes: "", startIsland: null } };
+  state.chapters = { 1: { prices: emptyGrid(), notes: "", startIsland: null, commissions: [], currentCargo: [] } };
   state.currentChapter = 1;
   state.ledger = [];
   state.ringOrder = new Array(ISLANDS.length).fill(null);
   window.__tradeOrigin = null;
   window.__tradeDest = null;
   window.__selectedRouteKey = null;
+  window.__recalcFormOpen = false;
+  window.__recalcStaging = null;
   saveState();
   activeTab = "price";
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "price"));
@@ -388,10 +392,54 @@ function enumerateRoutes(maxLen, fixedStart) {
   return routes;
 }
 
+// 품목 하나를 이 항로에서 어디서 파는 게 최선인지 계산한다. afterIndex 다음 정류장들의 시장 판매가 중
+// 최고가와, 그 품목의 의뢰(있다면) 보상을 비교해 더 유리한 쪽을 고른다. 의뢰는 딱 1개분만 적용되므로
+// (여러 개를 갖고 있다면) "의뢰 보상을 받는 1개" 묶음과 "시장가로 파는 나머지" 묶음으로 나눠 돌려준다.
+// usedCommissionKeys에 이미 들어있는 의뢰는 (다른 정류장에서 이미 배정됐다는 뜻이므로) 다시 제안하지 않는다 —
+// 의뢰는 항로 전체에서 딱 1번만 채울 수 있다.
+function sellLotsFor(itemName, qty, chapterData, route, afterIndex, commissions, usedCommissionKeys) {
+  if (!qty || qty <= 0) return [];
+  let marketBest = null;
+  let marketIdx = null;
+  for (let j = afterIndex + 1; j < route.length; j++) {
+    const sellCell = chapterData.prices[itemName][route[j]];
+    if (sellCell && sellCell.sell !== null && sellCell.sell !== undefined) {
+      if (marketBest === null || sellCell.sell > marketBest) {
+        marketBest = sellCell.sell;
+        marketIdx = j;
+      }
+    }
+  }
+
+  const commission = (commissions || []).find((c) => c.item === itemName);
+  const commissionKey = commission ? `${commission.item}→${commission.destIsland}` : null;
+  const alreadyUsed = commissionKey && usedCommissionKeys && usedCommissionKeys.has(commissionKey);
+  const destIdx = commission && !alreadyUsed ? route.indexOf(commission.destIsland, afterIndex + 1) : -1;
+  const hasCommission = commission && destIdx !== -1;
+
+  const lots = [];
+  if (hasCommission) {
+    const commissionBeats = marketBest === null || commission.reward > marketBest;
+    lots.push({
+      qty: Math.min(1, qty),
+      sellPrice: commissionBeats ? commission.reward : marketBest,
+      sellIdx: commissionBeats ? destIdx : marketIdx,
+      isCommission: commissionBeats,
+      commissionKey: commissionBeats ? commissionKey : null,
+    });
+    if (qty > 1 && marketBest !== null) {
+      lots.push({ qty: qty - 1, sellPrice: marketBest, sellIdx: marketIdx, isCommission: false, commissionKey: null });
+    }
+  } else if (marketBest !== null) {
+    lots.push({ qty, sellPrice: marketBest, sellIdx: marketIdx, isCommission: false, commissionKey: null });
+  }
+  return lots.filter((l) => l.qty > 0);
+}
+
 // 어떤 항로를 따라갈 때, 한 정류장(stopIndex)에서 살 만한 품목들을 ROI(마진/구매가) 순으로 예산과 재고가
-// 허락하는 만큼 담는다. 각 품목은 이 항로에서 앞으로 남은 정류장 중 판매가가 가장 높은 곳에서 팔 것으로 계획한다.
-// 재고는 "구매"만 제한하고 "판매"는 무제한이라고 가정한다 (섬에 도착 전 살 수 있는 재고만 stock으로 기록되므로).
-function planStopPurchases(chapterData, remainingStock, island, route, stopIndex, cash) {
+// 허락하는 만큼 담는다. 각 품목은 이 항로에서 앞으로 남은 정류장 중 판매가(의뢰 보상 포함)가 가장 높은
+// 곳에서 팔 것으로 계획한다. 재고는 "구매"만 제한하고 "판매"는 무제한이라고 가정한다.
+function planStopPurchases(chapterData, remainingStock, island, route, stopIndex, cash, commissions, usedCommissionKeys) {
   const candidates = [];
   ITEMS.forEach((it) => {
     if (it.exclusive && it.exclusive !== island) return;
@@ -400,21 +448,22 @@ function planStopPurchases(chapterData, remainingStock, island, route, stopIndex
     const stockLeft = remainingStock[it.name][island];
     if (stockLeft !== null && stockLeft !== undefined && stockLeft <= 0) return;
 
-    let bestSell = null;
-    let bestIdx = null;
-    for (let j = stopIndex + 1; j < route.length; j++) {
-      const sellCell = chapterData.prices[it.name][route[j]];
-      if (sellCell && sellCell.sell !== null && sellCell.sell !== undefined) {
-        if (bestSell === null || sellCell.sell > bestSell) {
-          bestSell = sellCell.sell;
-          bestIdx = j;
-        }
-      }
-    }
-    if (bestSell === null) return; // 이 항로에서는 팔 곳이 없음
-    const margin = bestSell - buyCell.buy;
-    if (margin <= 0) return;
-    candidates.push({ item: it, buyPrice: buyCell.buy, stockLeft, sellPrice: bestSell, sellIdx: bestIdx, margin });
+    const stockLeftNum = stockLeft === null || stockLeft === undefined ? Infinity : stockLeft;
+    const lots = sellLotsFor(it.name, stockLeftNum, chapterData, route, stopIndex, commissions, usedCommissionKeys);
+    lots.forEach((lot) => {
+      const margin = lot.sellPrice - buyCell.buy;
+      if (margin <= 0) return;
+      candidates.push({
+        item: it,
+        buyPrice: buyCell.buy,
+        stockLeft: lot.qty,
+        sellPrice: lot.sellPrice,
+        sellIdx: lot.sellIdx,
+        margin,
+        isCommission: lot.isCommission,
+        commissionKey: lot.commissionKey,
+      });
+    });
   });
 
   candidates.sort((a, b) => b.margin / b.buyPrice - a.margin / a.buyPrice);
@@ -436,8 +485,10 @@ function planStopPurchases(chapterData, remainingStock, island, route, stopIndex
 
 // 정해진 항로를 순서대로 따라가며: (1) 이 정류장에서 팔기로 예정된 것들을 먼저 팔아 현금화하고,
 // (2) 그 현금으로 다시 그리디하게 사들이는 과정을 시뮬레이션한다. 같은 섬을 다시 들르면(예: 3→4→3→2)
-// 첫 방문 때 산 만큼 재고가 줄어든 상태로 반영된다.
-function simulateRoute(chapterData, route, startBudget) {
+// 첫 방문 때 산 만큼 재고가 줄어든 상태로 반영된다. initialCargo는 항로를 시작하기 전에 이미 들고 있는
+// 짐(계획과 다르게 사버렸거나 의뢰용으로 챙긴 것 등)으로, 항로 어딘가에서 팔릴 곳을 새로 찾아 반영한다.
+function simulateRoute(chapterData, route, startBudget, initialCargo) {
+  const commissions = chapterData.commissions || [];
   const remainingStock = {};
   ITEMS.forEach((it) => {
     remainingStock[it.name] = {};
@@ -448,6 +499,23 @@ function simulateRoute(chapterData, route, startBudget) {
 
   let cash = startBudget;
   let holdings = [];
+  const usedCommissionKeys = new Set();
+  (initialCargo || []).forEach((entry) => {
+    const lots = sellLotsFor(entry.item.name, entry.qty, chapterData, route, -1, commissions, usedCommissionKeys);
+    lots.forEach((lot) => {
+      if (lot.isCommission && lot.commissionKey) usedCommissionKeys.add(lot.commissionKey);
+      holdings.push({
+        item: entry.item,
+        qty: lot.qty,
+        buyPrice: null,
+        buyIsland: "보유 중이던 짐",
+        sellIdx: lot.sellIdx,
+        sellPrice: lot.sellPrice,
+        isCommission: lot.isCommission,
+      });
+    });
+  });
+
   const steps = [];
 
   route.forEach((island, idx) => {
@@ -463,14 +531,24 @@ function simulateRoute(chapterData, route, startBudget) {
         buyPrice: h.buyPrice,
         sellPrice: h.sellPrice,
         revenue,
-        profit: revenue - h.qty * h.buyPrice,
+        profit: h.buyPrice === null ? null : revenue - h.qty * h.buyPrice,
+        isCommission: h.isCommission,
       };
     });
 
-    const { picks, remaining } = planStopPurchases(chapterData, remainingStock, island, route, idx, cash);
+    const { picks, remaining } = planStopPurchases(chapterData, remainingStock, island, route, idx, cash, commissions, usedCommissionKeys);
     picks.forEach((p) => {
+      if (p.isCommission && p.commissionKey) usedCommissionKeys.add(p.commissionKey);
       remainingStock[p.item.name][island] -= p.qty;
-      holdings.push({ item: p.item, qty: p.qty, buyPrice: p.buyPrice, buyIsland: island, sellIdx: p.sellIdx, sellPrice: p.sellPrice });
+      holdings.push({
+        item: p.item,
+        qty: p.qty,
+        buyPrice: p.buyPrice,
+        buyIsland: island,
+        sellIdx: p.sellIdx,
+        sellPrice: p.sellPrice,
+        isCommission: p.isCommission,
+      });
     });
     cash = remaining;
 
@@ -484,6 +562,7 @@ function simulateRoute(chapterData, route, startBudget) {
         cost: p.cost,
         sellIsland: route[p.sellIdx],
         sellPrice: p.sellPrice,
+        isCommission: p.isCommission,
       })),
       cashAfter: cash,
     });
@@ -492,9 +571,9 @@ function simulateRoute(chapterData, route, startBudget) {
   return { route, steps, finalCash: cash, profit: cash - startBudget };
 }
 
-function findBestRoutes(chapterData, budget, maxLen, fixedStart) {
+function findBestRoutes(chapterData, budget, maxLen, fixedStart, initialCargo) {
   const routes = enumerateRoutes(maxLen, fixedStart);
-  return routes.map((route) => simulateRoute(chapterData, route, budget)).sort((a, b) => b.finalCash - a.finalCash);
+  return routes.map((route) => simulateRoute(chapterData, route, budget, initialCargo)).sort((a, b) => b.finalCash - a.finalCash);
 }
 
 function bestTradeForItem(chapterData, item, originFilter, destFilter) {
@@ -639,16 +718,26 @@ function routeStepsHTML(result, startBudget) {
             <td style="text-align:left">${
               s.sells.length
                 ? s.sells
-                    .map(
-                      (se) =>
-                        `${se.item} ${se.qty}개 (${se.buyIsland} ${fmt(se.buyPrice)} → 여기 ${fmt(se.sellPrice)}) <span class="profit-pos">+${fmt(se.profit)}</span>`
-                    )
+                    .map((se) => {
+                      const tag = se.isCommission ? `🎁 의뢰 ` : "";
+                      const buyPart = se.buyPrice === null ? se.buyIsland : `${se.buyIsland} ${fmt(se.buyPrice)} →`;
+                      const profitPart =
+                        se.profit === null
+                          ? ""
+                          : ` <span class="profit-pos">+${fmt(se.profit)}</span>`;
+                      return `${tag}${se.item} ${se.qty}개 (${buyPart} 여기 ${fmt(se.sellPrice)})${profitPart}`;
+                    })
                     .join("<br>")
                 : "-"
             }</td>
             <td style="text-align:left">${
               s.buys.length
-                ? s.buys.map((b) => `${b.item} ${b.qty}개 (개당 ${fmt(b.buyPrice)}) → ${b.sellIsland}에서 판매 예정`).join("<br>")
+                ? s.buys
+                    .map(
+                      (b) =>
+                        `${b.isCommission ? "🎁 의뢰 " : ""}${b.item} ${b.qty}개 (개당 ${fmt(b.buyPrice)}) → ${b.sellIsland}에서 판매 예정`
+                    )
+                    .join("<br>")
                 : "-"
             }</td>
             <td>${fmt(s.cashAfter)}</td>
@@ -676,7 +765,84 @@ function routeKey(route) {
 function firstStopBuyPreviewHTML(route) {
   const buys = route.steps[0].buys;
   if (!buys.length) return `<span class="muted">-</span>`;
-  return buys.map((b) => `${b.item} ${b.qty}개`).join("<br>");
+  return buys.map((b) => `${b.isCommission ? "🎁 " : ""}${b.item} ${b.qty}개`).join("<br>");
+}
+
+function commissionPanelHTML(chapterData) {
+  const list = chapterData.commissions || [];
+  return `
+    <div class="row" style="flex-direction:column;align-items:stretch">
+      <label>🎁 의뢰 (선택 사항) — 품목 1개를 지정한 섬에 갖다주면 받는 보상</label>
+      ${
+        list.length
+          ? list
+              .map(
+                (c, i) =>
+                  `<div class="row" style="margin:2px 0"><span class="tag">${c.item} → ${c.destIsland} : 보상 ${fmt(c.reward)}</span><button class="btn small secondary" data-remove-commission="${i}">삭제</button></div>`
+              )
+              .join("")
+          : `<p class="muted">등록된 의뢰가 없습니다.</p>`
+      }
+      <div class="row">
+        <select id="commission-item">${ITEMS.map((it) => `<option value="${it.name}">${it.name}</option>`).join("")}</select>
+        <select id="commission-dest">${ISLANDS.map((isl) => `<option value="${isl}">${isl}</option>`).join("")}</select>
+        <input type="number" id="commission-reward" placeholder="보상(골드)" style="width:100px">
+        <button class="btn small" id="commission-add-btn">의뢰 추가</button>
+      </div>
+      <p class="hint">등록하면, 그 품목 1개는 시장가 대신(시장가가 더 높으면 시장가로) 이 보상으로 파는 걸로 계산해서 항로를 추천합니다. 나머지 수량은 평소처럼 시장가로 계산됩니다.</p>
+    </div>
+  `;
+}
+
+function recalcPanelHTML(chapterData) {
+  if (!window.__recalcFormOpen) {
+    return `
+      <div class="row">
+        <button class="btn small secondary" id="recalc-toggle-btn" style="border-color:var(--accent);color:var(--accent)">📋 계획이 틀어졌어요 (여기서 다시 계산)</button>
+        <span class="muted">의뢰나 돌발 이벤트 때문에 추천과 다르게 사버렸다면, 여기를 눌러 지금 상태를 입력하고 나머지 항로를 다시 계산하세요.</span>
+      </div>
+    `;
+  }
+
+  const staging = window.__recalcStaging;
+  const cargo = staging.cargo || [];
+  return `
+    <div class="panel" style="background:#0d2038;border-color:var(--accent)">
+      <h3 style="margin-top:0;color:var(--accent)">📋 지금 상태로 다시 계산하기</h3>
+      <div class="row">
+        <label>지금 있는 섬</label>
+        <select id="recalc-start-island">
+          <option value="" ${!staging.startIsland ? "selected" : ""}>처음 시작 (한가운데)</option>
+          ${ISLANDS.map((isl) => `<option value="${isl}" ${staging.startIsland === isl ? "selected" : ""}>${isl}</option>`).join("")}
+        </select>
+        <label>지금 가진 돈</label>
+        <input type="number" id="recalc-budget" value="${staging.budget || ""}" style="width:110px">
+      </div>
+      <div class="row" style="flex-direction:column;align-items:stretch">
+        <label>지금 들고 있는 짐 (아직 안 판 것)</label>
+        ${
+          cargo.length
+            ? cargo
+                .map(
+                  (c, i) =>
+                    `<div class="row" style="margin:2px 0"><span class="tag">${c.itemName} ${c.qty}개</span><button class="btn small secondary" data-remove-cargo="${i}">삭제</button></div>`
+                )
+                .join("")
+            : `<p class="muted">없음</p>`
+        }
+        <div class="row">
+          <select id="recalc-cargo-item">${ITEMS.map((it) => `<option value="${it.name}">${it.name}</option>`).join("")}</select>
+          <input type="number" id="recalc-cargo-qty" placeholder="수량" style="width:70px" value="1">
+          <button class="btn small" id="recalc-cargo-add-btn">짐 추가</button>
+        </div>
+      </div>
+      <p class="hint">가격이 바뀐 섬이 있다면 "시세 입력" 탭에서 먼저 고쳐주세요. 그다음 여기서 지금 있는 섬 / 가진 돈 / 들고 있는 짐을 입력하고 "다시 계산하기"를 누르면, 그 상태를 기준으로 남은 항로를 새로 추천합니다.</p>
+      <div class="row">
+        <button class="btn small" id="recalc-apply-btn">다시 계산하기</button>
+        <button class="btn small secondary" id="recalc-cancel-btn">취소</button>
+      </div>
+    </div>
+  `;
 }
 
 function routeRecommendationBodyHTML(chapterData) {
@@ -690,8 +856,20 @@ function routeRecommendationBodyHTML(chapterData) {
 
   const visitCount = state.routeVisitCount || MAX_ROUTE_LEN;
   const fixedStart = chapterData.startIsland || null;
-  const allRoutes = findBestRoutes(chapterData, budget, visitCount, fixedStart);
+  const initialCargo = (chapterData.currentCargo || [])
+    .map((c) => ({ item: ITEMS.find((it) => it.name === c.itemName), qty: c.qty }))
+    .filter((c) => c.item && c.qty > 0);
+  const allRoutes = findBestRoutes(chapterData, budget, visitCount, fixedStart, initialCargo);
   if (!allRoutes.length) return `<p class="muted">계산할 항로가 없습니다.</p>`;
+
+  const cargoNoteHTML = initialCargo.length
+    ? `<p class="hint">🎒 지금 들고 있는 짐(${initialCargo.map((c) => `${c.item.name} ${c.qty}개`).join(", ")})을 항로 어딘가에서 파는 것까지 포함해서 계산했습니다.</p>`
+    : "";
+  const commissionNoteHTML = (chapterData.commissions || []).length
+    ? `<p class="hint">🎁 등록된 의뢰(${(chapterData.commissions || [])
+        .map((c) => `${c.item}→${c.destIsland} ${fmt(c.reward)}`)
+        .join(", ")})가 유리할 때 자동으로 반영됩니다.</p>`
+    : "";
 
   const topRoutes = allRoutes.slice(0, 5);
   const selectedKey = window.__selectedRouteKey || routeKey(allRoutes[0].route);
@@ -736,6 +914,8 @@ function routeRecommendationBodyHTML(chapterData) {
       <div class="card"><div class="label">예상 순이익 (${fmt(budget)} 기준)</div><div class="value profit-pos">+${fmt(allRoutes[0].profit)}</div></div>
     </div>
     <p class="hint">👉 ${allRoutes[0].route[0]}에 도착하면 살 것: ${firstStopBuyPreviewHTML(allRoutes[0]).replace(/<br>/g, ", ")}</p>
+    ${cargoNoteHTML}
+    ${commissionNoteHTML}
 
     ${byStartSectionHTML}
 
@@ -814,6 +994,11 @@ function renderTradeTab(main) {
       </select>
       <span class="muted">턴이 부족해서 3개 섬만 돌 계획이면 "3개 섬"을 골라보세요. 그 기준으로 최적 항로를 다시 계산합니다.</span>
     </div>
+    <hr class="sep">
+    ${commissionPanelHTML(chapterData)}
+    <hr class="sep">
+    <div id="recalc-panel">${recalcPanelHTML(chapterData)}</div>
+    <hr class="sep">
     <div id="route-panel-body">${routeRecommendationBodyHTML(chapterData)}</div>
   `;
   main.appendChild(routePanel);
@@ -989,6 +1174,104 @@ function renderTradeTab(main) {
     saveState();
     render();
   });
+
+  document.getElementById("commission-add-btn").addEventListener("click", () => {
+    const item = document.getElementById("commission-item").value;
+    const destIsland = document.getElementById("commission-dest").value;
+    const reward = Number(document.getElementById("commission-reward").value) || 0;
+    if (!reward) {
+      alert("보상 금액을 입력하세요.");
+      return;
+    }
+    if (!chapterData.commissions) chapterData.commissions = [];
+    chapterData.commissions.push({ item, destIsland, reward });
+    window.__selectedRouteKey = null;
+    saveState();
+    render();
+  });
+
+  document.querySelectorAll("[data-remove-commission]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.removeCommission);
+      chapterData.commissions.splice(idx, 1);
+      window.__selectedRouteKey = null;
+      saveState();
+      render();
+    });
+  });
+
+  const recalcToggleBtn = document.getElementById("recalc-toggle-btn");
+  if (recalcToggleBtn) {
+    recalcToggleBtn.addEventListener("click", () => {
+      window.__recalcFormOpen = true;
+      window.__recalcStaging = {
+        startIsland: chapterData.startIsland,
+        budget: state.budget,
+        cargo: (chapterData.currentCargo || []).map((c) => ({ ...c })),
+      };
+      render();
+    });
+  }
+
+  const recalcCancelBtn = document.getElementById("recalc-cancel-btn");
+  if (recalcCancelBtn) {
+    recalcCancelBtn.addEventListener("click", () => {
+      window.__recalcFormOpen = false;
+      window.__recalcStaging = null;
+      render();
+    });
+  }
+
+  const recalcStartIslandSel = document.getElementById("recalc-start-island");
+  if (recalcStartIslandSel) {
+    recalcStartIslandSel.addEventListener("change", (e) => {
+      window.__recalcStaging.startIsland = e.target.value || null;
+    });
+  }
+
+  const recalcBudgetInput = document.getElementById("recalc-budget");
+  if (recalcBudgetInput) {
+    recalcBudgetInput.addEventListener("input", (e) => {
+      window.__recalcStaging.budget = Number(e.target.value) || 0;
+    });
+  }
+
+  const recalcCargoAddBtn = document.getElementById("recalc-cargo-add-btn");
+  if (recalcCargoAddBtn) {
+    recalcCargoAddBtn.addEventListener("click", () => {
+      const itemName = document.getElementById("recalc-cargo-item").value;
+      const qty = Number(document.getElementById("recalc-cargo-qty").value) || 0;
+      if (qty <= 0) return;
+      const cargo = window.__recalcStaging.cargo;
+      const existing = cargo.find((c) => c.itemName === itemName);
+      if (existing) existing.qty += qty;
+      else cargo.push({ itemName, qty });
+      render();
+    });
+  }
+
+  document.querySelectorAll("[data-remove-cargo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.removeCargo);
+      window.__recalcStaging.cargo.splice(idx, 1);
+      render();
+    });
+  });
+
+  const recalcApplyBtn = document.getElementById("recalc-apply-btn");
+  if (recalcApplyBtn) {
+    recalcApplyBtn.addEventListener("click", () => {
+      const staging = window.__recalcStaging;
+      chapterData.startIsland = staging.startIsland || null;
+      state.budget = staging.budget || 0;
+      chapterData.currentCargo = (staging.cargo || []).map((c) => ({ ...c }));
+      window.__recalcFormOpen = false;
+      window.__recalcStaging = null;
+      window.__selectedRouteKey = null;
+      saveState();
+      render();
+    });
+  }
 
   wireRoutePanelEvents(chapterData);
 }
