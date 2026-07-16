@@ -588,7 +588,7 @@ function simulateRoute(chapterData, route, startBudget, initialCargo) {
     });
   });
 
-  return { route, steps, finalCash: cash, profit: cash - startBudget };
+  return { route, steps, finalCash: cash, profit: cash - startBudget, remainingStock };
 }
 
 function findBestRoutes(chapterData, budget, maxLen, fixedStart, initialCargo) {
@@ -782,6 +782,83 @@ function routeStepsHTML(result, startBudget) {
   `;
 }
 
+// 항로의 마지막 섬은 이번 장 턴이 다 돼서 다음 장까지 머무르게 될 가능성이 높다. 그 섬에 남은 재고 중
+// 평소 평균보다 싸게 나온 품목을, 남은 예산 안에서 얼마나 사둘 만한지 추천한다. 다음 장이 되면 이 섬에서
+// 바로 팔거나, 그때 다시 이동 가능한 인접섬에 가서 팔 수 있다 (다음 장 시세는 아직 모르므로 평소 평균을
+// 기준으로 삼는다).
+function lastStopStockpileHTML(chapterData, result) {
+  const lastIsland = result.route[result.route.length - 1];
+  const leftoverCash = result.finalCash;
+  const remainingStock = result.remainingStock;
+
+  const rows = [];
+  ITEMS.forEach((it) => {
+    if (it.exclusive && it.exclusive !== lastIsland) return;
+    const cell = chapterData.prices[it.name][lastIsland];
+    if (cell.buy === null || cell.buy === undefined) return;
+    const stockLeft = remainingStock[it.name][lastIsland];
+    if (stockLeft !== null && stockLeft !== undefined && stockLeft <= 0) return;
+    const stats = computeItemStats(it.name);
+    const discountPct = stats.avgLowBuy ? ((stats.avgLowBuy - cell.buy) / stats.avgLowBuy) * 100 : null;
+    const maxByStock = stockLeft === null || stockLeft === undefined ? Infinity : stockLeft;
+    const maxByBudget = cell.buy > 0 ? Math.floor(leftoverCash / cell.buy) : 0;
+    const maxQty = Math.min(maxByStock, maxByBudget);
+    rows.push({
+      item: it,
+      buyPrice: cell.buy,
+      stockLeft,
+      avgLowBuy: stats.avgLowBuy,
+      avgHighSell: stats.avgHighSell,
+      discountPct,
+      sampleCount: stats.lowBuyCount,
+      maxQty,
+    });
+  });
+  rows.sort((a, b) => {
+    if (a.discountPct === null && b.discountPct === null) return a.buyPrice - b.buyPrice;
+    if (a.discountPct === null) return 1;
+    if (b.discountPct === null) return -1;
+    return b.discountPct - a.discountPct;
+  });
+
+  const neighbors = neighborsOf(lastIsland);
+
+  return `
+    <h4 style="color:var(--accent-2);margin-top:16px;margin-bottom:6px">🏁 항로 마지막 섬(${lastIsland})에서 다음 장까지 사둘 것 추천</h4>
+    <p class="hint">이 항로대로면 ${lastIsland}에서 이번 장이 끝나 다음 장까지 여기 머무를 가능성이 높아요. 남는 돈 ${fmt(
+    leftoverCash
+  )}으로, 평소 평균 구매가보다 싸게 나온 품목을 사두면 다음 장에 여기서 바로 팔거나 인접섬(${
+    neighbors.length ? neighbors.join(", ") : "없음 - 근접섬 체크 필요"
+  })으로 가서 팔 수 있어요. 다음 장 시세는 아직 모르니 지금까지의 평균 가격을 기준으로 예측한 값입니다.</p>
+    <div class="table-wrap" style="max-height:none">
+      <table>
+        <thead><tr><th>품목</th><th>지금 구매가</th><th>평소 낮은 평균</th><th>할인율</th><th>평소 높은 판매 평균</th><th>남은 재고</th><th>예산 내 최대 구매</th></tr></thead>
+        <tbody>
+          ${
+            rows.length
+              ? rows
+                  .map(
+                    (r) => `<tr>
+              <td class="item-name" style="position:static">${r.item.name}${r.item.exclusive ? `<span class="badge exclusive">${r.item.exclusive} 전용</span>` : ""}</td>
+              <td>${fmt(r.buyPrice)}</td>
+              <td>${r.avgLowBuy !== null ? fmt(Math.round(r.avgLowBuy)) : "-"}</td>
+              <td class="${r.discountPct === null ? "" : r.discountPct >= 0 ? "profit-pos" : "profit-neg"}">${
+                      r.discountPct === null ? "기록 부족" : `${r.discountPct >= 0 ? "▼" : "▲"} ${Math.abs(r.discountPct).toFixed(1)}%`
+                    }</td>
+              <td>${r.avgHighSell !== null ? fmt(Math.round(r.avgHighSell)) : "-"}</td>
+              <td>${fmt(r.stockLeft)}</td>
+              <td>${r.maxQty > 0 ? `${r.maxQty}개 (${fmt(r.maxQty * r.buyPrice)})` : "-"}</td>
+            </tr>`
+                  )
+                  .join("")
+              : `<tr><td colspan="7" class="muted">${lastIsland}에서 구매 가능한 품목이 없습니다.</td></tr>`
+          }
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function routeKey(route) {
   return route.join("|");
 }
@@ -968,6 +1045,8 @@ function routeRecommendationBodyHTML(chapterData) {
     <h4 style="color:var(--accent-2);margin-top:16px">선택한 항로 상세: ${selected.route.join(" → ")}</h4>
     ${routeStepsHTML(selected, budget)}
     <p class="hint">※ 같은 섬을 다시 들르는 경로(예: 3번째→4번째→3번째→2번째)는 첫 방문 때 산 만큼 재고가 줄어든 상태로 계산에 반영됩니다. 판매는 재고와 무관하게 언제든 가능하다고 가정합니다.</p>
+
+    ${lastStopStockpileHTML(chapterData, selected)}
   `;
 }
 
