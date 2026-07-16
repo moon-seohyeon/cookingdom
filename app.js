@@ -24,8 +24,10 @@ function defaultState() {
     budget: 0,
     // 항해(내구도 소진 등)가 리셋돼도 사라지지 않는, 품목별 누적 가격 통계
     archivedPriceStats: {},
-    // 이번 항해 지도의 섬 배치(고리 순서). 1번째~6번째 섬이 실제 어느 섬인지. 항해가 리셋되면 지도가 바뀌므로 함께 초기화된다.
-    ringOrder: new Array(ISLANDS.length).fill(null),
+    // 이번 항해 지도에서 어느 섬과 어느 섬이 서로 근접섬(최단거리로 한 번에 이동 가능)인지.
+    // 지도 모양이 항해마다 달라(원형, 하트 모양 등) 고정된 순서로 가정할 수 없어서 쌍으로 직접 기록한다.
+    // [["농부들의 섬","목동들의 섬"], ...] 형태. 항해가 리셋되면 지도가 바뀌므로 함께 초기화된다.
+    adjacency: [],
     // 이번 장에서 실제로 몇 개 섬을 돌 예정인지 (턴이 부족해 3개만 돌 수도 있음)
     routeVisitCount: MAX_ROUTE_LEN,
   };
@@ -41,8 +43,8 @@ function loadState() {
     if (!parsed.chapters || !parsed.chapters[1]) return defaultState();
     if (parsed.budget === undefined) parsed.budget = 0;
     if (!parsed.archivedPriceStats) parsed.archivedPriceStats = {};
-    if (!parsed.ringOrder || parsed.ringOrder.length !== ISLANDS.length) {
-      parsed.ringOrder = new Array(ISLANDS.length).fill(null);
+    if (!Array.isArray(parsed.adjacency)) {
+      parsed.adjacency = [];
     }
     if (!parsed.routeVisitCount) parsed.routeVisitCount = MAX_ROUTE_LEN;
     return parsed;
@@ -154,7 +156,7 @@ function resetVoyage() {
   state.chapters = { 1: { prices: emptyGrid(), notes: "", startIsland: null, commissions: [], currentCargo: [] } };
   state.currentChapter = 1;
   state.ledger = [];
-  state.ringOrder = new Array(ISLANDS.length).fill(null);
+  state.adjacency = [];
   state.budget = 15000;
   window.__tradeOrigin = null;
   window.__tradeDest = null;
@@ -357,23 +359,40 @@ function renderPriceTab(main) {
 
 const ALL_OPTION = "__ALL__";
 
-// ---------- 섬 배치(고리 순서) & 최적 항로 계산 ----------
+// ---------- 섬 배치(근접섬 그래프) & 최적 항로 계산 ----------
 // 항해 시작 시 배는 지도 한가운데서 출발해 6개 섬 중 아무 곳이나 첫 목적지로 갈 수 있고,
-// 그 다음부터는 최단거리 이동만 하므로 "고리(육각형)"로 이어진 양옆 섬으로만 움직인다고 가정한다.
+// 그 다음부터는 최단거리 이동만 하므로 서로 근접섬인 곳으로만 움직인다고 가정한다.
+// 지도 모양은 항해마다 달라(원형, 하트 모양 등) 고정된 순서로 가정할 수 없으므로,
+// 어느 섬과 어느 섬이 근접섬인지를 쌍(state.adjacency)으로 직접 입력받는다.
 
-function ringOrderComplete() {
-  const order = state.ringOrder;
-  if (!order || order.length !== ISLANDS.length) return false;
-  if (order.some((v) => !v)) return false;
-  return new Set(order).size === order.length;
+function pairKey(a, b) {
+  return [a, b].sort().join("↔");
+}
+
+function isAdjacentPair(a, b) {
+  return (state.adjacency || []).some((pair) => pairKey(pair[0], pair[1]) === pairKey(a, b));
+}
+
+function toggleAdjacencyPair(a, b) {
+  if (!state.adjacency) state.adjacency = [];
+  const idx = state.adjacency.findIndex((pair) => pairKey(pair[0], pair[1]) === pairKey(a, b));
+  if (idx === -1) state.adjacency.push([a, b]);
+  else state.adjacency.splice(idx, 1);
+}
+
+// 모든 섬이 최소 1개의 근접섬을 갖고 있으면(고립된 섬이 없으면) 항로 계산 준비가 된 것으로 본다.
+function adjacencyComplete() {
+  if (!state.adjacency || !state.adjacency.length) return false;
+  return ISLANDS.every((isl) => state.adjacency.some((pair) => pair.includes(isl)));
 }
 
 function neighborsOf(island) {
-  const order = state.ringOrder;
-  const idx = order.indexOf(island);
-  if (idx === -1) return [];
-  const n = order.length;
-  return [order[(idx - 1 + n) % n], order[(idx + 1) % n]];
+  const neighbors = new Set();
+  (state.adjacency || []).forEach((pair) => {
+    if (pair[0] === island) neighbors.add(pair[1]);
+    if (pair[1] === island) neighbors.add(pair[0]);
+  });
+  return Array.from(neighbors);
 }
 
 // 첫 섬에서 시작해(고정 출발섬이 없으면 6곳 중 아무 곳이나), 그 뒤로는 근접섬으로만 이동하는
@@ -388,7 +407,7 @@ function enumerateRoutes(maxLen, fixedStart) {
     }
     neighborsOf(path[path.length - 1]).forEach((next) => extend(path.concat([next])));
   }
-  const starts = fixedStart ? [fixedStart] : state.ringOrder;
+  const starts = fixedStart ? [fixedStart] : ISLANDS;
   starts.forEach((start) => extend([start]));
   return routes;
 }
@@ -675,33 +694,38 @@ function budgetPlanHTML(trades) {
 
 // ---------- 섬 배치 입력 + 최적 항로 추천 UI ----------
 
-function ringOrderPanelHTML() {
-  const order = state.ringOrder;
-  const counts = {};
-  order.forEach((v) => {
-    if (v) counts[v] = (counts[v] || 0) + 1;
-  });
-  const hasDup = Object.values(counts).some((c) => c > 1);
+function allIslandPairs() {
+  const pairs = [];
+  for (let i = 0; i < ISLANDS.length; i++) {
+    for (let j = i + 1; j < ISLANDS.length; j++) {
+      pairs.push([ISLANDS[i], ISLANDS[j]]);
+    }
+  }
+  return pairs;
+}
 
+function adjacencyPanelHTML() {
+  const isolated = ISLANDS.filter((isl) => !neighborsOf(isl).length);
   return `
-    <h3 style="margin-top:0;color:var(--accent-2)">🗺️ 이번 항해 섬 배치</h3>
-    <p class="hint">배는 항해 시작 시 지도 한가운데서 출발해 6개 섬 중 아무 곳이나 먼저 갈 수 있고, 그 다음부터는 고리(육각형)로 이어진 양옆 근접섬으로만 최단거리 이동을 합니다. 1번째 섬부터 6번째 섬까지, 실제로 어느 섬인지 순서대로 골라서 알려주세요 (예: 1번=농부들의 섬, 2번=목동들의 섬이면 두 섬은 서로 근접섬). 새 항해를 시작하면 지도가 바뀌므로 다시 설정해야 합니다.</p>
-    <div class="row" style="flex-wrap:wrap;gap:10px">
-      ${order
+    <h3 style="margin-top:0;color:var(--accent-2)">🗺️ 이번 항해 섬 배치 (근접섬 체크)</h3>
+    <p class="hint">배는 항해 시작 시 지도 한가운데서 출발해 6개 섬 중 아무 곳이나 먼저 갈 수 있고, 그 다음부터는 근접섬으로만 최단거리 이동을 합니다. 지도 모양이 항해마다 달라서(원형, 하트 모양 등) 실제 게임 지도를 보고, 서로 한 번에 이동 가능한(근접한) 섬 쌍을 아래에서 전부 체크해주세요. 새 항해를 시작하면 지도가 바뀌므로 다시 체크해야 합니다.</p>
+    <div class="row" style="flex-wrap:wrap;gap:6px 18px;align-items:flex-start">
+      ${allIslandPairs()
         .map(
-          (v, i) => `
-        <div style="display:flex;flex-direction:column;gap:2px">
-          <label style="font-size:0.75rem">${i + 1}번째 섬</label>
-          <select data-ring-idx="${i}">
-            <option value="">선택</option>
-            ${ISLANDS.map((isl) => `<option value="${isl}" ${v === isl ? "selected" : ""}>${isl}</option>`).join("")}
-          </select>
-        </div>
+          ([a, b]) => `
+        <label style="display:flex;align-items:center;gap:5px;font-size:0.82rem;min-width:220px">
+          <input type="checkbox" data-pair-a="${a}" data-pair-b="${b}" ${isAdjacentPair(a, b) ? "checked" : ""}>
+          ${a} ↔ ${b}
+        </label>
       `
         )
         .join("")}
     </div>
-    ${hasDup ? `<p class="hint" style="color:var(--bad)">⚠️ 같은 섬이 두 번 이상 선택됐습니다. 서로 다른 섬 6개를 선택하세요.</p>` : ""}
+    ${
+      isolated.length
+        ? `<p class="hint" style="color:var(--bad)">⚠️ 근접섬이 하나도 체크되지 않은 섬: ${isolated.join(", ")}. 이 섬들은 항로 계산에서 갈 곳이 없다고 나올 수 있어요.</p>`
+        : ""
+    }
   `;
 }
 
@@ -847,8 +871,8 @@ function recalcPanelHTML(chapterData) {
 }
 
 function routeRecommendationBodyHTML(chapterData) {
-  if (!ringOrderComplete()) {
-    return `<p class="muted">위에서 6개 섬 배치를 서로 다르게 모두 선택하면, 최적 시작섬과 연속 거래 항로를 계산해줍니다.</p>`;
+  if (!adjacencyComplete()) {
+    return `<p class="muted">위에서 이번 항해 지도의 근접섬 쌍을 체크하면(모든 섬이 최소 1개 이상), 최적 시작섬과 연속 거래 항로를 계산해줍니다.</p>`;
   }
   const budget = state.budget || 0;
   if (!budget) {
@@ -976,7 +1000,7 @@ function renderTradeTab(main) {
   const routePanel = document.createElement("div");
   routePanel.className = "panel";
   routePanel.innerHTML = `
-    ${ringOrderPanelHTML()}
+    ${adjacencyPanelHTML()}
     <hr class="sep">
     <div class="row">
       <label>${cur}장 · 지금 배가 있는 섬 (이번 장 시작 위치)</label>
@@ -1152,10 +1176,9 @@ function renderTradeTab(main) {
     wireRoutePanelEvents(chapterData);
   });
 
-  document.querySelectorAll("select[data-ring-idx]").forEach((sel) => {
-    sel.addEventListener("change", (e) => {
-      const idx = Number(e.target.dataset.ringIdx);
-      state.ringOrder[idx] = e.target.value || null;
+  document.querySelectorAll("input[data-pair-a]").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      toggleAdjacencyPair(e.target.dataset.pairA, e.target.dataset.pairB);
       window.__selectedRouteKey = null;
       saveState();
       render();
