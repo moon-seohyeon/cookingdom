@@ -227,6 +227,32 @@ function scoreOf(member) {
     .reduce((sum, m) => sum + (m.points || 0), 0);
 }
 
+const RANK_MEDALS = ["🥇", "🥈", "🥉"];
+
+function renderRankingBox() {
+  const top = Object.values(membersState)
+    .map((m) => ({ name: m.name, character: m.character, score: scoreOf(m) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  if (top.every((t) => t.score === 0)) return "";
+
+  const rows = top
+    .map(
+      (t, i) => `<div class="ranking-row">
+        <span class="ranking-medal">${RANK_MEDALS[i]}</span>
+        <span class="ranking-name">${escapeHtml(t.name)} <span class="ranking-character">(${escapeHtml(t.character || "")})</span></span>
+        <span class="ranking-score">${t.score}점</span>
+      </div>`
+    )
+    .join("");
+
+  return `<div class="ranking-box">
+    <h3>🏆 서버 기여도 랭킹</h3>
+    ${rows}
+  </div>`;
+}
+
 function renderMembers() {
   const el = document.getElementById("view-members");
   if (Object.keys(membersState).length === 0) {
@@ -234,6 +260,7 @@ function renderMembers() {
     return;
   }
   const order = sortedMemberIds();
+  const rankingBox = renderRankingBox();
 
   const addMemberForm = isAdmin
     ? `<form class="add-member-form" data-form="add-member">
@@ -310,7 +337,7 @@ function renderMembers() {
     })
     .join("");
 
-  el.innerHTML = addMemberForm + cards;
+  el.innerHTML = rankingBox + addMemberForm + cards;
 }
 
 document.getElementById("view-members").addEventListener("click", async (e) => {
