@@ -306,12 +306,6 @@ main#views {
   flex-wrap: wrap;
 }
 
-.rank-badge {
-  font-size: 1.3rem;
-  width: 30px;
-  text-align: center;
-}
-
 .member-name {
   font-size: 1.1rem;
   font-weight: 800;

@@ -226,23 +226,12 @@ function scoreOf(member) {
     .reduce((sum, m) => sum + (m.points || 0), 0);
 }
 
-function rankMap() {
-  const entries = Object.entries(membersState).map(([id, m]) => [id, scoreOf(m)]);
-  entries.sort((a, b) => b[1] - a[1]);
-  const map = {};
-  entries.forEach(([id], i) => (map[id] = i + 1));
-  return map;
-}
-
-const RANK_BADGE = { 1: "🥇", 2: "🥈", 3: "🥉" };
-
 function renderMembers() {
   const el = document.getElementById("view-members");
   if (Object.keys(membersState).length === 0) {
     el.innerHTML = `<div class="empty-state">불러오는 중...</div>`;
     return;
   }
-  const ranks = rankMap();
   const order = sortedMemberIds();
 
   const addMemberForm = isAdmin
@@ -258,27 +247,29 @@ function renderMembers() {
       const m = membersState[id];
       const score = scoreOf(m);
       const lvl = getLevel(score);
-      const rank = ranks[id];
-      const badge = RANK_BADGE[rank] || `#${rank}`;
       const missions = m.missions || [];
 
       const missionRows = missions.length
         ? missions
             .map((mission) => {
-              const actions =
+              const statusActions =
                 isAdmin && mission.status === "pending"
                   ? `<button class="btn-small" data-action="mission-success" data-member="${id}" data-mission="${mission.id}">✅ 성공</button>
                      <button class="btn-small" data-action="mission-fail" data-member="${id}" data-mission="${mission.id}">❌ 실패</button>`
                   : isAdmin
                   ? `<button class="btn-small" data-action="mission-reset" data-member="${id}" data-mission="${mission.id}">↺ 되돌리기</button>`
                   : "";
+              const deleteAction = isAdmin
+                ? `<button class="btn-danger" data-action="mission-delete" data-member="${id}" data-mission="${mission.id}">✕</button>`
+                : "";
               const statusLabel =
                 mission.status === "success" ? "성공" : mission.status === "fail" ? "실패" : "대기";
               return `<div class="mission-row">
                 <span class="mission-text">${escapeHtml(mission.text)}</span>
                 <span class="mission-points">+${mission.points}</span>
                 <span class="mission-status ${mission.status}">${statusLabel}</span>
-                ${actions}
+                ${statusActions}
+                ${deleteAction}
               </div>`;
             })
             .join("")
@@ -294,8 +285,7 @@ function renderMembers() {
 
       return `<div class="member-card">
         <div class="member-head">
-          <span class="rank-badge">${badge}</span>
-          <span class="member-name">${escapeHtml(m.name)}</span>
+          <span class="member-name">${m.pinned ? "대장 " : ""}${escapeHtml(m.name)}</span>
           <span class="member-character">(${escapeHtml(m.character || "")})</span>
           <div class="member-level">
             ${lvl.emoji} Lv.${lvl.level} ${lvl.title}
@@ -319,6 +309,19 @@ document.getElementById("view-members").addEventListener("click", async (e) => {
   const missionId = btn.dataset.mission;
   const member = membersState[memberId];
   if (!member) return;
+
+  if (btn.dataset.action === "mission-delete") {
+    if (!confirm("이 미션을 삭제할까요?")) return;
+    const missions = (member.missions || []).filter((m) => m.id !== missionId);
+    try {
+      await updateDoc(doc(db, "members", memberId), { missions });
+    } catch (err) {
+      console.error(err);
+      alert("삭제에 실패했어요.");
+    }
+    return;
+  }
+
   const missions = (member.missions || []).map((m) =>
     m.id === missionId
       ? { ...m, status: btn.dataset.action === "mission-success" ? "success" : btn.dataset.action === "mission-fail" ? "fail" : "pending" }
