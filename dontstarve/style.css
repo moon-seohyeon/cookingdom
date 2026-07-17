@@ -259,6 +259,50 @@ main#views {
 }
 
 /* ---------- 팀원 미션 ---------- */
+.ranking-box {
+  background: linear-gradient(135deg, #fff3d6, #fbe7b8);
+  border: 1px solid #e8c67a;
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  box-shadow: var(--shadow);
+}
+
+.ranking-box h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  color: var(--brown-dark);
+}
+
+.ranking-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.ranking-medal {
+  font-size: 1.2rem;
+  width: 26px;
+  text-align: center;
+}
+
+.ranking-name {
+  flex: 1;
+  font-weight: 700;
+}
+
+.ranking-character {
+  font-weight: 400;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.ranking-score {
+  font-weight: 700;
+  color: var(--accent-dark);
+}
+
 .add-member-form,
 .add-note-form {
   background: var(--card);
