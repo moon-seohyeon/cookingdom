@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🔥 굶지마 팀 서바이벌 로그</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="goal-banner" class="goal-banner"></header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="materials">🥩 재료 현황</button>
+    <button class="tab-btn" data-tab="members">🧑‍🤝‍🧑 팀원 미션</button>
+    <button class="tab-btn" data-tab="notes">📓 게임 메모</button>
+  </nav>
+
+  <div class="admin-bar">
+    <span id="admin-status">👀 뷰어 모드</span>
+    <button id="admin-toggle-btn" class="btn-small">🔑 관리자 로그인</button>
+  </div>
+
+  <main id="views">
+    <section id="view-materials" class="view active"></section>
+    <section id="view-members" class="view"></section>
+    <section id="view-notes" class="view"></section>
+  </main>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
