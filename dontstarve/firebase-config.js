@@ -4,12 +4,12 @@
 // 그 값을 아래에 그대로 붙여넣어 주세요. (이 값들은 공개되어도 안전한 값입니다 - 실제 접근 제어는
 // Firestore 보안 규칙으로 처리합니다)
 export const firebaseConfig = {
-  apiKey: "REPLACE_ME",
-  authDomain: "REPLACE_ME",
-  projectId: "REPLACE_ME",
-  storageBucket: "REPLACE_ME",
-  messagingSenderId: "REPLACE_ME",
-  appId: "REPLACE_ME",
+  apiKey: "AIzaSyDYcBr3kL-Sa5kaNendqSsd6H9opCvNqcg",
+  authDomain: "don-t-starve---soundplus.firebaseapp.com",
+  projectId: "don-t-starve---soundplus",
+  storageBucket: "don-t-starve---soundplus.firebasestorage.app",
+  messagingSenderId: "909868469975",
+  appId: "1:909868469975:web:f98dbf451e2fbd24082a92",
 };
 
 // 관리자(문보미) 전용 기능 잠금 해제용 PIN.
