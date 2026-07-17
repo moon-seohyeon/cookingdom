@@ -179,6 +179,7 @@ document.getElementById("view-materials").addEventListener("click", async (e) =>
 // 2. 팀원 미션
 // ---------------------------------------------------------------------------
 let membersState = {};
+let editingMembers = new Set();
 
 async function ensureSeedMembers() {
   const snap = await getDocs(collection(db, "members"));
@@ -283,10 +284,20 @@ function renderMembers() {
           </form>`
         : "";
 
+      const nameHtml = editingMembers.has(id)
+        ? `<form class="member-edit-form" data-form="edit-member" data-member="${id}">
+            <input type="text" name="name" value="${escapeHtml(m.name)}" placeholder="이름" required>
+            <input type="text" name="character" value="${escapeHtml(m.character || "")}" placeholder="캐릭터/역할">
+            <button type="submit" class="btn-small">저장</button>
+            <button type="button" class="btn-small" data-action="member-edit-cancel" data-member="${id}">취소</button>
+          </form>`
+        : `<span class="member-name">${m.pinned ? "대장 " : ""}${escapeHtml(m.name)}</span>
+           <span class="member-character">(${escapeHtml(m.character || "")})</span>
+           ${isAdmin ? `<button class="btn-small" data-action="member-edit" data-member="${id}">✏️ 수정</button>` : ""}`;
+
       return `<div class="member-card">
         <div class="member-head">
-          <span class="member-name">${m.pinned ? "대장 " : ""}${escapeHtml(m.name)}</span>
-          <span class="member-character">(${escapeHtml(m.character || "")})</span>
+          ${nameHtml}
           <div class="member-level">
             ${lvl.emoji} Lv.${lvl.level} ${lvl.title}
             <div class="member-score">기여도 ${score}점${lvl.next ? ` · 다음 레벨까지 ${lvl.next.min - score}점` : " · 최고 레벨"}</div>
@@ -309,6 +320,17 @@ document.getElementById("view-members").addEventListener("click", async (e) => {
   const missionId = btn.dataset.mission;
   const member = membersState[memberId];
   if (!member) return;
+
+  if (btn.dataset.action === "member-edit") {
+    editingMembers.add(memberId);
+    renderMembers();
+    return;
+  }
+  if (btn.dataset.action === "member-edit-cancel") {
+    editingMembers.delete(memberId);
+    renderMembers();
+    return;
+  }
 
   if (btn.dataset.action === "mission-delete") {
     if (!confirm("이 미션을 삭제할까요?")) return;
@@ -357,6 +379,19 @@ document.getElementById("view-members").addEventListener("submit", async (e) => 
       console.error(err);
       alert("저장에 실패했어요.");
     }
+  } else if (form.dataset.form === "edit-member") {
+    const memberId = form.dataset.member;
+    const name = form.elements["name"].value.trim();
+    const character = form.elements["character"].value.trim();
+    if (!name) return;
+    try {
+      await updateDoc(doc(db, "members", memberId), { name, character });
+      editingMembers.delete(memberId);
+      renderMembers();
+    } catch (err) {
+      console.error(err);
+      alert("저장에 실패했어요.");
+    }
   } else if (form.dataset.form === "add-member") {
     const name = form.elements["name"].value.trim();
     const character = form.elements["character"].value.trim();
@@ -389,7 +424,7 @@ function renderGoal() {
 
   if (isAdmin && goalEditing) {
     el.innerHTML = `
-      <div class="goal-label">🎯 이번 판 사냥 목표</div>
+      <div class="goal-label">🎯 이번 게임 목표</div>
       <textarea class="goal-edit" id="goal-edit-input" placeholder="이번 판에서 잡을 몬스터/목표를 적어주세요">${escapeHtml(text)}</textarea>
       <button class="btn-small" data-action="goal-save">저장</button>
       <button class="btn-small" data-action="goal-cancel">취소</button>
@@ -398,7 +433,7 @@ function renderGoal() {
   }
 
   el.innerHTML = `
-    <div class="goal-label">🎯 이번 판 사냥 목표</div>
+    <div class="goal-label">🎯 이번 게임 목표</div>
     <div class="goal-text${text ? "" : " placeholder"}">${text ? escapeHtml(text) : "아직 목표가 설정되지 않았어요."}</div>
     ${isAdmin ? `<button class="btn-small" data-action="goal-edit">✏️ 목표 수정</button>` : ""}
   `;

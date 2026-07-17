@@ -316,6 +316,23 @@ main#views {
   font-size: 0.9rem;
 }
 
+.member-edit-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-edit-form input {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  background: #fff;
+  color: var(--ink);
+}
+
 .member-level {
   margin-left: auto;
   text-align: right;
