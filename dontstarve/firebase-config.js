@@ -15,4 +15,4 @@ export const firebaseConfig = {
 // 관리자(문보미) 전용 기능 잠금 해제용 PIN.
 // 원하는 숫자/문자로 바꿔서 사용하세요. (보안 목적이 아니라 실수로 다른 사람이
 // 누르지 않게 하는 용도입니다 - 코드가 공개 저장소에 있으므로 완전한 보안은 아닙니다)
-export const ADMIN_PIN = "REPLACE_ME";
+export const ADMIN_PIN = "950809";
